@@ -2,6 +2,7 @@
 Gripper ROS2 Node - Wraps existing Gripper class for ROS control
 """
 
+import time
 import rclpy
 from rclpy.node import Node
 from rclpy.action import ActionServer
@@ -171,12 +172,10 @@ class GripperNode(Node):
     def set_force_callback(self, request, response):
         """Service callback to set gripper force limit"""
         try:
-            # Map force in Newtons to torque (simplified mapping)
-            # TODO: Use proper force-to-torque conversion based on gripper geometry
-            torque = int(min(max(request.max_force * 10, 0), 1023))
-
-            self.get_logger().info(f'Setting gripper force limit to {request.max_force:.2f} N (torque={torque})')
-            self.gripper.set_torque(torque)
+            # Gripper.set_force() uses the empirically-calibrated N→load polynomial
+            # (Stephen Otto's thesis, p17). Do not bypass it with a raw linear scaling.
+            self.get_logger().info(f'Setting gripper force limit to {request.max_force:.2f} N')
+            self.gripper.set_force(request.max_force, finger='both')
 
             response.success = True
             response.message = f'Force limit set to {request.max_force:.2f} N'
@@ -191,9 +190,10 @@ class GripperNode(Node):
         """Service callback to calibrate gripper"""
         try:
             self.get_logger().info('Calibrating gripper...')
-            # Open fully then close to reset
+            # Open fully, wait for motion to complete, then close.
+            # spin_once cannot be called inside a callback — it deadlocks.
             self.gripper.open_gripper()
-            rclpy.spin_once(self, timeout_sec=2.0)
+            time.sleep(2.0)
             self.gripper.close_gripper()
 
             response.success = True
@@ -243,9 +243,11 @@ class GripperNode(Node):
             feedback_msg.phase = 'initial_close'
             goal_handle.publish_feedback(feedback_msg)
 
-            # Use existing DeliGrasp implementation if available
-            if hasattr(self.gripper, 'deligrasp'):
-                final_aperture_mm, final_force_n, _, grasp_log = self.gripper.deligrasp(
+            # deligrasp() is blocking (serial I/O + time.sleep throughout).
+            # Calling it directly in an async callback freezes the ROS executor.
+            # Use deligrasp_async() which offloads blocking work via asyncio.to_thread.
+            if hasattr(self.gripper, 'deligrasp_async'):
+                final_aperture_mm, final_force_n, _, grasp_log = await self.gripper.deligrasp_async(
                     x=params.goal_aperture,
                     fc=params.initial_force,
                     dx=params.additional_closure,
@@ -285,8 +287,11 @@ class GripperNode(Node):
         """Clean shutdown"""
         self.get_logger().info('Shutting down Gripper Node...')
         try:
-            # Open gripper before shutdown for safety
             self.gripper.open_gripper()
+        except:
+            pass
+        try:
+            self.gripper.disconnect()
         except:
             pass
         super().destroy_node()
