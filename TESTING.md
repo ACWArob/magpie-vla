@@ -161,6 +161,9 @@ ros2 topic hz /arm/tcp_pose --window 20
 ```bash
 source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
 ros2 run magpie_control ur5_node
+
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+
 ```
 
 **Terminal 2 — run tests:**
@@ -230,5 +233,50 @@ ros2 service call /arm/stop std_srvs/srv/Trigger {}
 
 ---
 
-## Stage 5 — Full Pipeline (camera + DeliGrasp)
+## Stage 5 — Gemini + Gripper (camera → LLM → grasp)
+
+**Hardware required:** RealSense camera (USB), MAGPIE gripper (12V + USB).  
+No arm needed for this stage.
+
+**Prerequisites:**
+```bash
+export GEMINI_API_KEY=your_key_from_aistudio_google_com
+```
+
+**Terminal 1 — start gripper node:**
+```bash
+sg dialout -c "bash -c 'source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash && ros2 run magpie_control gripper_node'"
+```
+
+**Terminal 2 — run test:**
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 ~/magpie_control/scripts/test_gemini_gripper.py --task "pick up the block"
+```
+
+**What it does:**
+1. Captures one RealSense frame
+2. Sends frame + task description to Gemini 2.5 Flash with the `mp_prompt_tc_vision_phys` system prompt
+3. Extracts `initial_force`, `additional_force`, `spring_constant` from the response
+4. Opens gripper, sets force limit to `initial_force`
+5. 3-second countdown — place object between fingers
+6. Closes gripper (auto-stops at force limit on contact)
+7. Holds 3 seconds, then opens
+
+**Expected results:**
+
+| Step | Expected |
+|---|---|
+| Gemini call | Prints raw response + 3 extracted parameters |
+| Gripper open | Opens to ~103 mm |
+| Gripper close | Stops when it contacts the object at Gemini's force limit |
+| Gripper open (release) | Returns to ~103 mm |
+
+**Note:** Get a free tier API key from **aistudio.google.com** — keys from Google Cloud Console have zero quota on free tier.
+
+**Verified:** Gemini returned `initial_force=1.60N`, `additional_force=0.01N`, `spring_constant=1000 N/m` for a red block. Gripper opened, closed to contact, and released automatically. ✓
+
+---
+
+## Stage 6 — Full Pipeline (arm + camera + DeliGrasp)
 *(to be added after hardware test)*

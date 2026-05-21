@@ -1011,3 +1011,17 @@ Added Google Gemini vision call to `deligrasp_node.py` to replace hardcoded Deli
 **Note:** Free tier API keys from Google Cloud Console have `limit: 0` quota. Keys must be created from **aistudio.google.com** to get free tier quota.
 
 All gripper services verified functional on hardware. See [TESTING.md](TESTING.md) for full command reference.
+
+### D3-7: Gemini + Gripper Closed-Loop Test
+
+Added `scripts/test_gemini_gripper.py` — end-to-end test without the arm:
+
+1. Captures one RealSense frame
+2. Calls Gemini 2.5 Flash with `mp_prompt_tc_vision_phys` to get grasp parameters
+3. Opens gripper, sets force limit to Gemini's `initial_force`
+4. 3-second countdown, then closes automatically — gripper stops on contact at the force limit
+5. Holds 3 seconds, then releases
+
+No `input()` pauses — fully automatic once the object is placed. The gripper's built-in force feedback handles contact detection and stop.
+
+**Verified:** Gemini returned `initial_force=1.60N`, `additional_force=0.01N`, `spring_constant=1000 N/m` for a red block. Gripper closed to contact and released without user interaction. ✓
