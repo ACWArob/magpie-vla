@@ -98,6 +98,11 @@ class DeliGraspNode(Node):
         self.declare_parameter('initial_force', 1.5)      # N
         self.declare_parameter('additional_force', 0.2)   # N
         self.declare_parameter('additional_closure', 1.0) # mm
+        # 'grounding_dino' or 'owlvit'
+        self.declare_parameter('detector_type', 'grounding_dino')
+        # LLM: set use_llm=true and llm_instruction to derive object_query via OpenAI
+        self.declare_parameter('use_llm', False)
+        self.declare_parameter('llm_instruction', '')
 
         # ── State ───────────────────────────────────────────────────────────
         self.bridge = CvBridge()
@@ -138,6 +143,7 @@ class DeliGraspNode(Node):
 
         # ── Perception models ────────────────────────────────────────────────
         self._load_perception()
+        self._check_realsense_usb_speed()
 
         self.get_logger().info('DeliGrasp Node ready')
 
@@ -157,24 +163,90 @@ class DeliGraspNode(Node):
 
     # ── Perception ─────────────────────────────────────────────────────────────
 
-    def _load_perception(self):
+    def _check_realsense_usb_speed(self):
+        """Warn if the RealSense D405 is connected to a USB <3.0 port (limits FPS to ~10)."""
+        import subprocess, re
         try:
-            from magpie_perception.label_dino import LabelDINO
-            self.detector = LabelDINO()
-            self.get_logger().info('Grounding DINO loaded')
-        except ImportError:
-            self.detector = None
-            self.get_logger().warning(
-                'magpie_perception not installed — run: '
-                'pip install git+https://github.com/correlllab/magpie_perception')
+            out = subprocess.check_output(
+                ['lsusb', '-v', '-d', '8086:0b5b'],
+                stderr=subprocess.DEVNULL, text=True)
+            match = re.search(r'bcdUSB\s+([\d.]+)', out)
+            if match:
+                version = float(match.group(1))
+                if version < 3.0:
+                    self.get_logger().warning(
+                        f'RealSense D405 connected at USB {version:.2f} — '
+                        'max ~10 FPS. Plug into a blue USB 3.0 port for 30 FPS.')
+                else:
+                    self.get_logger().info(f'RealSense D405 USB speed: {version:.2f} (OK)')
+            else:
+                self.get_logger().warning('RealSense D405 not detected via lsusb — is it plugged in?')
+        except Exception:
+            pass  # lsusb not available or camera not connected — not fatal
+
+    def _load_perception(self):
+        detector_type = self.get_parameter('detector_type').value
+        self.detector = None
+        if detector_type == 'grounding_dino':
+            try:
+                from magpie_perception.label_dino import LabelDINO
+                self.detector = LabelDINO()
+                self.get_logger().info('Grounding DINO loaded')
+            except ImportError:
+                self.get_logger().warning('magpie_perception not installed — detector unavailable')
+        elif detector_type == 'owlvit':
+            try:
+                from magpie_perception.label_owl import LabelOWL
+                self.detector = LabelOWL()
+                self.get_logger().info('OWL-ViT loaded')
+            except ImportError:
+                self.get_logger().warning('magpie_perception not installed — detector unavailable')
+        else:
+            self.get_logger().warning(f'Unknown detector_type "{detector_type}" — use grounding_dino or owlvit')
+
+    def _resolve_query(self):
+        """Return the object query string, optionally via LLM."""
+        if self.get_parameter('use_llm').value:
+            instruction = self.get_parameter('llm_instruction').value
+            if not instruction:
+                self.get_logger().warning('use_llm=true but llm_instruction is empty — falling back to object_query')
+            else:
+                try:
+                    return self._llm_extract_object(instruction)
+                except Exception as e:
+                    self.get_logger().error(f'LLM query extraction failed: {e} — falling back to object_query')
+        return self.get_parameter('object_query').value
+
+    def _llm_extract_object(self, instruction: str) -> str:
+        """Use OpenAI + magpie_prompts to extract object name from a natural language instruction."""
+        import re, ast
+        from openai import OpenAI
+        from magpie_prompts.prompts.dg_command_enumerator import prompt_command_enumerator
+        client = OpenAI()  # reads OPENAI_API_KEY from environment
+        response = client.chat.completions.create(
+            model='gpt-4o-mini',
+            messages=[
+                {'role': 'system', 'content': prompt_command_enumerator},
+                {'role': 'user',   'content': instruction},
+            ],
+        )
+        text = response.choices[0].message.content
+        match = re.search(r'\[start of enumeration\](.*?)\[end of enumeration\]', text, re.DOTALL)
+        if not match:
+            raise RuntimeError(f'LLM did not return expected format: {text}')
+        parsed = ast.literal_eval(match.group(1).strip())
+        objects = parsed.get('objects', [])
+        if not objects:
+            raise RuntimeError(f'LLM returned no objects: {parsed}')
+        query = objects[0]
+        self.get_logger().info(f'LLM resolved "{instruction}" → query="{query}"')
+        return query
 
     def _detect(self, query, confidence):
-        """Run Grounding DINO. Returns (boxes, labels, scores) or raises."""
+        """Run detector. Returns (boxes, labels, scores) or raises."""
         if self.detector is None:
-            raise RuntimeError(
-                'magpie_perception not installed — cannot run detection')
-        boxes, labels, scores = self.detector.label(
-            self.color_image, query, confidence)
+            raise RuntimeError('No detector loaded — check detector_type parameter')
+        boxes, labels, scores = self.detector.label(self.color_image, query, confidence)
         return boxes, labels, scores
 
     # ── Geometry helpers ───────────────────────────────────────────────────────
@@ -240,7 +312,7 @@ class DeliGraspNode(Node):
             if val is None:
                 raise RuntimeError(f'No {name} received yet — is the pipeline running?')
 
-        query      = self.get_parameter('object_query').value
+        query      = self._resolve_query()
         confidence = self.get_parameter('detection_confidence').value
         approach_h = self.get_parameter('approach_height').value
         grasp_off  = self.get_parameter('grasp_z_offset').value

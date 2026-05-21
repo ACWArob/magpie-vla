@@ -14,6 +14,12 @@ from magpie_msgs.srv import MoveJoint, MoveLinear, GetPose, SetSpeed
 from magpie_control.ur5 import UR5_Interface
 from magpie_control import poses
 
+# servoJ/servoL defaults — tune per application
+# time: duration of each servo step (s); lookahead: smoothing window (s); gain: stiffness
+_SERVO_TIME        = 0.002   # 500 Hz update cycle
+_SERVO_LOOKAHEAD   = 0.1
+_SERVO_GAIN        = 300
+
 # Standard UR5 joint names expected by ROS tooling
 _JOINT_NAMES = [
     'shoulder_pan_joint',
@@ -101,17 +107,24 @@ class UR5Node(Node):
             self.get_logger().error(f'Failed to connect to UR5: {e}')
             raise
 
+        self._teach_mode = False
+
         # Publishers
         self.pub_joints = self.create_publisher(JointState, 'arm/joint_states', 10)
         self.pub_tcp = self.create_publisher(PoseStamped, 'arm/tcp_pose', 10)
 
         # Services
-        self.create_service(MoveJoint,  'arm/move_j',    self.move_j_callback)
-        self.create_service(MoveLinear, 'arm/move_l',    self.move_l_callback)
-        self.create_service(GetPose,    'arm/get_pose',  self.get_pose_callback)
-        self.create_service(SetSpeed,   'arm/set_speed', self.set_speed_callback)
-        self.create_service(Trigger,    'arm/move_safe', self.move_safe_callback)
-        self.create_service(Trigger,    'arm/stop',      self.stop_callback)
+        self.create_service(MoveJoint,  'arm/move_j',      self.move_j_callback)
+        self.create_service(MoveLinear, 'arm/move_l',      self.move_l_callback)
+        self.create_service(GetPose,    'arm/get_pose',    self.get_pose_callback)
+        self.create_service(SetSpeed,   'arm/set_speed',   self.set_speed_callback)
+        self.create_service(Trigger,    'arm/move_safe',   self.move_safe_callback)
+        self.create_service(Trigger,    'arm/stop',        self.stop_callback)
+        self.create_service(Trigger,    'arm/teach_mode',  self.teach_mode_callback)
+
+        # Servo subscriptions for high-frequency streaming
+        self.create_subscription(JointState,   'arm/servo_j_cmd', self.servo_j_callback, 10)
+        self.create_subscription(PoseStamped,  'arm/servo_l_cmd', self.servo_l_callback, 10)
 
         pub_rate = self.get_parameter('publish_rate').value
         self.timer = self.create_timer(1.0 / pub_rate, self.publish_state)
@@ -138,8 +151,59 @@ class UR5Node(Node):
         except Exception as e:
             self.get_logger().warning(f'Error publishing arm state: {e}')
 
+    def _teach_mode_blocked(self, response):
+        """Fill response and return True if teach mode is active."""
+        if self._teach_mode:
+            response.success = False
+            response.message = 'Teach mode active — call /arm/teach_mode to disable first'
+            return True
+        return False
+
+    def teach_mode_callback(self, request, response):
+        """Toggle freedrive (teach) mode. Blocks all motion commands while active."""
+        try:
+            self.ur5.toggle_teach_mode()
+            self._teach_mode = not self._teach_mode
+            state = 'enabled' if self._teach_mode else 'disabled'
+            self.get_logger().info(f'Teach mode {state}')
+            response.success = True
+            response.message = f'Teach mode {state}'
+        except Exception as e:
+            response.success = False
+            response.message = str(e)
+            self.get_logger().error(f'TeachMode toggle failed: {e}')
+        return response
+
+    def servo_j_callback(self, msg):
+        """Stream joint-space servo target (high frequency). Publish to /arm/servo_j_cmd."""
+        if self._teach_mode:
+            self.get_logger().warning('ServoJ blocked: teach mode active', throttle_duration_sec=2.0)
+            return
+        q = list(msg.position)
+        if len(q) != 6:
+            self.get_logger().warning(f'ServoJ: expected 6 joints, got {len(q)}')
+            return
+        try:
+            self.ur5.ctrl.servoJ(q, 0.0, 0.0, _SERVO_TIME, _SERVO_LOOKAHEAD, _SERVO_GAIN)
+        except Exception as e:
+            self.get_logger().error(f'ServoJ failed: {e}')
+
+    def servo_l_callback(self, msg):
+        """Stream Cartesian servo target (high frequency). Publish to /arm/servo_l_cmd."""
+        if self._teach_mode:
+            self.get_logger().warning('ServoL blocked: teach mode active', throttle_duration_sec=2.0)
+            return
+        try:
+            matrix = _pose_msg_to_matrix(msg.pose)
+            vec = poses.pose_mtrx_to_vec(np.array(matrix))
+            self.ur5.ctrl.servoL(vec, 0.0, 0.0, _SERVO_TIME, _SERVO_LOOKAHEAD, _SERVO_GAIN)
+        except Exception as e:
+            self.get_logger().error(f'ServoL failed: {e}')
+
     def move_j_callback(self, request, response):
         """Move to joint configuration."""
+        if self._teach_mode_blocked(response):
+            return response
         try:
             q = list(request.joint_positions)
             speed = request.speed if request.speed > 0.0 else self.rot_speed
@@ -157,6 +221,8 @@ class UR5Node(Node):
 
     def move_l_callback(self, request, response):
         """Move end-effector linearly to target pose."""
+        if self._teach_mode_blocked(response):
+            return response
         try:
             matrix = _pose_msg_to_matrix(request.target_pose)
             speed = request.speed if request.speed > 0.0 else self.lin_speed
@@ -208,6 +274,8 @@ class UR5Node(Node):
 
     def move_safe_callback(self, request, response):
         """Move to pre-defined safe joint configuration."""
+        if self._teach_mode_blocked(response):
+            return response
         try:
             self.get_logger().info('Moving to safe position...')
             self.ur5.move_safe(rotSpeed=self.rot_speed,

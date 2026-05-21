@@ -57,13 +57,18 @@ def generate_launch_description():
         parameters=[LaunchConfiguration('gripper_config')],
     )
 
-    # DeliGrasp Node
+    # DeliGrasp Node — remaps camera topics to /camera/gripper_camera namespace
     deligrasp_node = Node(
         package='magpie_control',
         executable='deligrasp_node',
         name='deligrasp_node',
         output='screen',
         parameters=[LaunchConfiguration('gripper_config')],
+        remappings=[
+            ('/camera/camera/color/image_raw',        '/camera/gripper_camera/color/image_raw'),
+            ('/camera/camera/depth/image_rect_raw',   '/camera/gripper_camera/depth/image_rect_raw'),
+            ('/camera/camera/color/camera_info',      '/camera/gripper_camera/color/camera_info'),
+        ],
     )
 
     return LaunchDescription([

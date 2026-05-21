@@ -706,3 +706,218 @@ cp -r /tmp/magpie_perception/src/magpie_perception \
 | No collision avoidance | Arm moves in straight lines without checking obstacles | Future: migrate to `ur_robot_driver` + MoveIt 2 |
 | Tactile sensors (E-flesh) not implemented | `tactile_sensor_node` is a stub | Implement when E-flesh ROS driver is available |
 | `goal_aperture` hardcoded to 30mm | DeliGrasp starts from fixed width | Should be estimated from detection bounding box width + depth |
+
+---
+
+## Day 2 — Mentor Review and Refinements
+
+### Mentor Feedback (Summary)
+
+After completing the initial ROSification, the following feedback was received:
+
+1. The F/T sensor **onboard the UR5** is the **OnRobot HEX-E**, not the ATI Mini45. The ATI Mini45 + NetFT box is a separate sensor not currently mounted on the robot.
+2. The F/T sensor poll rate should be configurable — it already is via `poll_rate` in `gripper_config.yaml`.
+3. `/arm/joint_states` and `/arm/tcp_pose` publish rate should be configurable — it is via `publish_rate` in `gripper_config.yaml`.
+4. The arm node should support **teach mode** (freedrive) as a toggleable service that blocks other motion commands while active.
+5. The arm node should support **servoJ** and **servoL** for high-frequency streaming control.
+6. DeliGrasp node should use the **`magpie_prompts`** library to derive the object query from a natural language instruction via LLM.
+7. The camera namespace `/camera/camera/` is redundant — should be `/camera/gripper_camera/`.
+8. A **standalone `/gripper/clear_error` service** should exist separately from `/gripper/reset_parameters`.
+9. The deligrasp action server feedback should come from the **`/gripper/state` topic**, not internal serial reads.
+10. Multiple detectors should be supported (Grounding DINO and OWL-ViT).
+11. A **USB speed warning** should alert the user if the RealSense is on a USB <3.0 port.
+
+---
+
+### F/T Sensor Clarification
+
+**Correction from Day 1:** The ATI Mini45 + NetFT box (`ft_sensor_node.py`) is **not mounted on the UR5**. It is a standalone sensor that may be integrated in the future.
+
+The UR5 wrist-mounted F/T sensor is the **OnRobot HEX-E**, which communicates via the UR5's internal tool I/O. This sensor is not yet integrated as a separate ROS node. If future work requires wrist F/T, the OnRobot ROS driver or direct URScript access should be used.
+
+---
+
+### Step D2-1 — Teach Mode Toggle (`ur5_node.py`)
+
+**Why teach mode matters:** Freedrive (teach mode) allows a human to physically move the arm to a desired pose by hand. While teach mode is active, the UR5 controller disables servo control. If a motion command (`moveJ`, `moveL`) were sent simultaneously, it would attempt to fight the human's motion, potentially causing a jerk or error. All motion callbacks must reject commands while teach mode is active.
+
+**Implementation:**
+- Added `/arm/teach_mode` service (`std_srvs/Trigger`) — each call toggles freedrive on/off
+- `self._teach_mode` boolean tracks state internally
+- `_teach_mode_blocked(response)` helper fills the response and returns `True` if motion is blocked
+- Applied to: `move_j_callback`, `move_l_callback`, `move_safe_callback`
+
+```python
+def teach_mode_callback(self, request, response):
+    self.ur5.toggle_teach_mode()
+    self._teach_mode = not self._teach_mode
+    state = 'enabled' if self._teach_mode else 'disabled'
+    response.success = True
+    response.message = f'Teach mode {state}'
+    return response
+```
+
+**Usage:**
+```bash
+ros2 service call /arm/teach_mode std_srvs/srv/Trigger {}   # enable freedrive
+# move arm by hand
+ros2 service call /arm/teach_mode std_srvs/srv/Trigger {}   # disable freedrive
+```
+
+---
+
+### Step D2-2 — ServoJ and ServoL (`ur5_node.py`)
+
+ServoJ and ServoL allow streaming high-frequency position targets to the arm without blocking — used for real-time control loops (e.g., from a learned policy or teleoperation). Unlike `moveJ`/`moveL` which block until complete, servo commands are fire-and-forget and must be sent continuously at the control rate.
+
+**RTDE servo parameters:**
+| Parameter | Value | Meaning |
+|---|---|---|
+| `time` | 0.002 s | Duration of each servo step (→ 500 Hz loop) |
+| `lookahead_time` | 0.1 s | Smoothing window — reduces jerk |
+| `gain` | 300 | Proportional position gain — higher = stiffer |
+
+**Safety constraint:** These commands bypass collision avoidance and motion planning entirely. Small, incremental targets should be used. Always test with `approach_height` clearance before running near objects.
+
+**Implementation:** Topic subscribers (not services) to support continuous streaming:
+- `/arm/servo_j_cmd` (`sensor_msgs/JointState`) → `ctrl.servoJ()`
+- `/arm/servo_l_cmd` (`geometry_msgs/PoseStamped`) → `ctrl.servoL()`
+
+Both are blocked if `self._teach_mode` is active.
+
+**Usage example (500 Hz loop in external node):**
+```python
+pub = node.create_publisher(JointState, '/arm/servo_j_cmd', 10)
+timer = node.create_timer(0.002, lambda: pub.publish(joint_target_msg))
+```
+
+---
+
+### Step D2-3 — Gripper Clear Error Service (`gripper_node.py`)
+
+The Dynamixel AX12-A motors enter an overload error state when torque limits are exceeded (e.g., during a failed grasp or unexpected collision). In this state, both motors disable torque output and the gripper goes limp.
+
+`/gripper/reset_parameters` resets all motor parameters AND opens the gripper — too destructive in mid-grasp. `/gripper/clear_error` calls `reset_packet_overload()` which only re-enables torque on both fingers, allowing recovery without disturbing other settings.
+
+```bash
+ros2 service call /gripper/clear_error std_srvs/srv/Trigger {}
+```
+
+---
+
+### Step D2-4 — DeliGrasp Feedback from `/gripper/state` Topic (`gripper_node.py`)
+
+**Previous behaviour:** The deligrasp action server collected force/aperture data via return values from `deligrasp_async()`, which in turn made direct serial reads inside the motor control loop.
+
+**New behaviour:** The 10 Hz state publisher (`publish_state`) already reads aperture, force, and temperature from hardware and stores the latest reading in `self._latest_state`. During deligrasp execution, a `self._collecting_log` flag causes `publish_state` to also append each sample to `self._deligrasp_state_log`. When deligrasp completes, the result's `final_aperture`, `final_force`, and `force_log` are all derived from this topic-sourced data — not from internal serial reads.
+
+**Why this is better:** A downstream node subscribing to `/gripper/state` sees the same data that is recorded in the grasp log. There is one source of truth for gripper state.
+
+---
+
+### Step D2-5 — LLM Integration (`deligrasp_node.py`)
+
+DeliGrasp requires knowing *what* to grasp. A hardcoded `object_query` parameter works for scripted demos but doesn't scale to natural language commands. The `magpie_prompts` library provides a structured LLM prompt (`dg_command_enumerator`) that extracts object names from free-form instructions.
+
+**How it works:**
+1. User sets `llm_instruction` to a natural language command: `"pick up the red cup"`
+2. The node calls OpenAI GPT-4o-mini with the `dg_command_enumerator` system prompt
+3. The LLM returns a structured Python dict: `{'objects': ['red cup'], 'manipulation': 'pick', ...}`
+4. The first object name is extracted and used as the Grounding DINO query
+
+**Installation:**
+```bash
+git clone https://github.com/correlllab/magpie_prompts.git /tmp/magpie_prompts
+cp -r /tmp/magpie_prompts/src/magpie_prompts ~/.local/lib/python3.10/site-packages/magpie_prompts
+pip install openai absl-py colorama termcolor
+```
+
+Note: same `src/` layout issue as `magpie_perception` — `pip install .` produces an empty wheel. Direct copy workaround applied.
+
+**Usage:**
+```bash
+# Set OPENAI_API_KEY in environment
+export OPENAI_API_KEY=sk-...
+
+ros2 param set /deligrasp_node use_llm true
+ros2 param set /deligrasp_node llm_instruction "pick up the water bottle"
+ros2 service call /grasp/execute std_srvs/srv/Trigger {}
+# Node logs: LLM resolved "pick up the water bottle" → query="water bottle"
+```
+
+If `use_llm=false` or no API key is set, falls back to `object_query` parameter.
+
+---
+
+### Step D2-6 — Multiple Detector Support (`deligrasp_node.py`)
+
+Added `detector_type` parameter (default: `grounding_dino`). Supported values:
+
+| Value | Model | Notes |
+|---|---|---|
+| `grounding_dino` | IDEA-Research/grounding-dino-tiny | Zero-shot, text-prompted, ~2–5 s/image on CPU |
+| `owlvit` | google/owlvit-base-patch32 | Zero-shot, faster than DINO on some hardware |
+
+Switch at runtime:
+```bash
+ros2 param set /deligrasp_node detector_type owlvit
+# Restart node for change to take effect (model loaded at startup)
+```
+
+---
+
+### Step D2-7 — Camera Namespace (`launch/gripper_control.launch.py`)
+
+The default `realsense2_camera` topic namespace `/camera/camera/` is redundant. The `deligrasp_node` now remaps its subscriptions to `/camera/gripper_camera/` via the launch file.
+
+To launch the camera with the matching namespace:
+```bash
+ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
+```
+
+This produces:
+```
+/camera/gripper_camera/color/image_raw
+/camera/gripper_camera/depth/image_rect_raw
+/camera/gripper_camera/color/camera_info
+```
+
+---
+
+### Step D2-8 — USB Speed Warning (`deligrasp_node.py`)
+
+At startup, `deligrasp_node` calls `lsusb -v -d 8086:0b5b` to check the RealSense D405 USB protocol version. If `bcdUSB < 3.0`, a ROS warning is logged:
+
+```
+[WARN] RealSense D405 connected at USB 2.10 — max ~10 FPS. Plug into a blue USB 3.0 port for 30 FPS.
+```
+
+This was confirmed active: the camera is currently on USB 2.10 and producing ~10 FPS.
+
+---
+
+### Colcon Workspace Symlink Fix
+
+**Problem discovered:** `~/ws_ctrl/src/magpie_control` was a standalone directory copy of the repo (made during initial setup). Edits to `~/magpie_control/` were not reaching the colcon build — the build was compiling the stale May 14 copy.
+
+**Fix:**
+```bash
+rm -rf ~/ws_ctrl/src/magpie_control
+ln -s ~/magpie_control ~/ws_ctrl/src/magpie_control
+colcon build --symlink-install
+```
+
+Now `~/magpie_control` is the single source of truth. All edits are immediately picked up on next build.
+
+---
+
+### Day 2 Verification Results
+
+| Node | Status | Notes |
+|---|---|---|
+| `gripper_node` | Pass | Starts on `/dev/ttyACM0` with `sg dialout` workaround |
+| `ft_sensor_node` | Pass | Connects to ATI Mini45 at 192.168.0.6:49152, 50 Hz |
+| `ur5_node` | Pass | Connects to UR5 at 192.168.0.4, teach mode + servo services registered |
+| `deligrasp_node` | Pass | DINO loaded, USB 2.10 warning fires, LLM integration ready |
+| `magpie_perception` | Pass | LabelDINO imports cleanly |
+| `magpie_prompts` | Pass | `dg_command_enumerator` prompt loads (requires `OPENAI_API_KEY` for live LLM calls) |
