@@ -717,9 +717,9 @@ After completing the initial ROSification, the following feedback was received:
 
 1. The F/T sensor **onboard the UR5** is the **OnRobot HEX-E**, not the ATI Mini45. The ATI Mini45 + NetFT box is a separate sensor not currently mounted on the robot.
 2. The F/T sensor poll rate should be configurable — it already is via `poll_rate` in `gripper_config.yaml`.
-3. `/arm/joint_states` and `/arm/tcp_pose` publish rate should be configurable — it is via `publish_rate` in `gripper_config.yaml`.
+3. `/arm/joint_states` and `/arm/tcp_pose` publish rate should be configurable. Default changed from 10 Hz → **500 Hz** (RTDE streams at 500 Hz; `UR5_Interface` already initialises the receive interface at `freq=500`).
 4. The arm node should support **teach mode** (freedrive) as a toggleable service that blocks other motion commands while active.
-5. The arm node should support **servoJ** and **servoL** for high-frequency streaming control.
+5. The arm node should support **servoJ** and **servoL** for high-frequency streaming control, with `servoStop()` called on stop and shutdown.
 6. DeliGrasp node should use the **`magpie_prompts`** library to derive the object query from a natural language instruction via LLM.
 7. The camera namespace `/camera/camera/` is redundant — should be `/camera/gripper_camera/`.
 8. A **standalone `/gripper/clear_error` service** should exist separately from `/gripper/reset_parameters`.
@@ -770,12 +770,15 @@ ros2 service call /arm/teach_mode std_srvs/srv/Trigger {}   # disable freedrive
 
 ServoJ and ServoL allow streaming high-frequency position targets to the arm without blocking — used for real-time control loops (e.g., from a learned policy or teleoperation). Unlike `moveJ`/`moveL` which block until complete, servo commands are fire-and-forget and must be sent continuously at the control rate.
 
-**RTDE servo parameters:**
-| Parameter | Value | Meaning |
-|---|---|---|
-| `time` | 0.002 s | Duration of each servo step (→ 500 Hz loop) |
-| `lookahead_time` | 0.1 s | Smoothing window — reduces jerk |
-| `gain` | 300 | Proportional position gain — higher = stiffer |
+**RTDE servo parameters** (verified against SDU Robotics RTDE API docs):
+
+| Parameter | Value | Valid Range | Meaning |
+|---|---|---|---|
+| `time` | 0.002 s | > 0 | Duration each call blocks — match your publish rate |
+| `lookahead_time` | 0.1 s | [0.03, 0.2] | Smoothing window — reduces jerk |
+| `gain` | 300 | [100, 2000] | Proportional position gain — higher = stiffer |
+
+Note: `speed` and `acceleration` arguments are **not used** in the current RTDE library version — passing `0.0` is correct.
 
 **Safety constraint:** These commands bypass collision avoidance and motion planning entirely. Small, incremental targets should be used. Always test with `approach_height` clearance before running near objects.
 
@@ -783,7 +786,7 @@ ServoJ and ServoL allow streaming high-frequency position targets to the arm wit
 - `/arm/servo_j_cmd` (`sensor_msgs/JointState`) → `ctrl.servoJ()`
 - `/arm/servo_l_cmd` (`geometry_msgs/PoseStamped`) → `ctrl.servoL()`
 
-Both are blocked if `self._teach_mode` is active.
+Both are blocked if `self._teach_mode` is active. `ctrl.servoStop()` is called in both `/arm/stop` and `destroy_node()` to exit servo mode cleanly before handing back regular control.
 
 **Usage example (500 Hz loop in external node):**
 ```python
@@ -866,21 +869,23 @@ ros2 param set /deligrasp_node detector_type owlvit
 
 ---
 
-### Step D2-7 — Camera Namespace (`launch/gripper_control.launch.py`)
+### Step D2-7 — Camera Namespace (`deligrasp_node.py`)
 
-The default `realsense2_camera` topic namespace `/camera/camera/` is redundant. The `deligrasp_node` now remaps its subscriptions to `/camera/gripper_camera/` via the launch file.
+The default `realsense2_camera` topic namespace `/camera/camera/` is redundant (outer `camera/` is the node namespace, inner `camera/` is the sensor module name). The subscriptions in `deligrasp_node.py` were updated to use `/camera/gripper_camera/` directly — no launch-file remapping needed.
 
-To launch the camera with the matching namespace:
-```bash
-ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
-```
-
-This produces:
+**Updated subscription topics:**
 ```
 /camera/gripper_camera/color/image_raw
 /camera/gripper_camera/depth/image_rect_raw
 /camera/gripper_camera/color/camera_info
 ```
+
+Launch the camera with the matching namespace:
+```bash
+ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
+```
+
+**Note:** An earlier version used launch-file `remappings=[]` to remap `/camera/camera/` → `/camera/gripper_camera/` at launch time. This was removed — the node topic strings now match the camera directly, which is cleaner and works when running the node standalone without the launch file.
 
 ---
 
@@ -917,7 +922,17 @@ Now `~/magpie_control` is the single source of truth. All edits are immediately 
 |---|---|---|
 | `gripper_node` | Pass | Starts on `/dev/ttyACM0` with `sg dialout` workaround |
 | `ft_sensor_node` | Pass | Connects to ATI Mini45 at 192.168.0.6:49152, 50 Hz |
-| `ur5_node` | Pass | Connects to UR5 at 192.168.0.4, teach mode + servo services registered |
-| `deligrasp_node` | Pass | DINO loaded, USB 2.10 warning fires, LLM integration ready |
+| `ur5_node` | Pass | Connects to UR5 at 192.168.0.4; teach mode, servoJ/L, servoStop all registered |
+| `deligrasp_node` | Pass | DINO loaded; USB 2.10 warning fires; subscribes to `/camera/gripper_camera/`; LLM ready |
 | `magpie_perception` | Pass | LabelDINO imports cleanly |
 | `magpie_prompts` | Pass | `dg_command_enumerator` prompt loads (requires `OPENAI_API_KEY` for live LLM calls) |
+
+### Post-Review Audit Fixes
+
+After an item-by-item audit against the mentor's original list, three additional gaps were found and corrected:
+
+| Gap | Fix |
+|---|---|
+| `deligrasp_node.py` subscriptions still used `/camera/camera/` | Updated to `/camera/gripper_camera/` directly in node; launch-file remappings removed |
+| `servoStop()` not called on `/arm/stop` or node shutdown | Added `ctrl.servoStop()` in `stop_callback` and `destroy_node` before `stopL`/`ur5.stop()` |
+| `publish_rate` default was 10 Hz in both config and node | Changed to 500 Hz — RTDE receive interface already initialised at 500 Hz in `ur5.py` |
