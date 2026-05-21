@@ -14,9 +14,11 @@ from magpie_msgs.srv import MoveJoint, MoveLinear, GetPose, SetSpeed
 from magpie_control.ur5 import UR5_Interface
 from magpie_control import poses
 
-# servoJ/servoL defaults — tune per application
-# time: duration of each servo step (s); lookahead: smoothing window (s); gain: stiffness
-_SERVO_TIME        = 0.002   # 500 Hz update cycle
+# servoJ/servoL defaults — per SDU Robotics RTDE API
+# time: duration each call blocks (s) — match your publish rate (0.002 = 500 Hz)
+# lookahead_time: smoothing window (s), valid range [0.03, 0.2]
+# gain: proportional position gain, valid range [100, 2000]; higher = stiffer
+_SERVO_TIME        = 0.002
 _SERVO_LOOKAHEAD   = 0.1
 _SERVO_GAIN        = 300
 
@@ -86,7 +88,7 @@ class UR5Node(Node):
         super().__init__('ur5_node')
 
         self.declare_parameter('robot_ip', '192.168.0.4')
-        self.declare_parameter('publish_rate', 10)
+        self.declare_parameter('publish_rate', 500)  # RTDE streams at 500 Hz
         self.declare_parameter('default_linear_speed', 0.25)
         self.declare_parameter('default_linear_accel', 0.5)
         self.declare_parameter('default_joint_speed', 1.05)
@@ -289,9 +291,10 @@ class UR5Node(Node):
         return response
 
     def stop_callback(self, request, response):
-        """Stop all arm motion immediately."""
+        """Stop all arm motion immediately, including any active servo mode."""
         try:
             self.get_logger().warning('ARM STOP called')
+            self.ur5.ctrl.servoStop()  # exit servo mode first if active
             self.ur5.ctrl.stopL()
             response.success = True
             response.message = 'Arm stopped'
@@ -302,6 +305,10 @@ class UR5Node(Node):
 
     def destroy_node(self):
         self.get_logger().info('Shutting down UR5 Node...')
+        try:
+            self.ur5.ctrl.servoStop()  # exit servo mode if active
+        except:
+            pass
         try:
             self.ur5.stop()
         except:

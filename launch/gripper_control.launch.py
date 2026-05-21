@@ -57,18 +57,14 @@ def generate_launch_description():
         parameters=[LaunchConfiguration('gripper_config')],
     )
 
-    # DeliGrasp Node — remaps camera topics to /camera/gripper_camera namespace
+    # DeliGrasp Node — expects camera on /camera/gripper_camera namespace
+    # Launch realsense with: ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
     deligrasp_node = Node(
         package='magpie_control',
         executable='deligrasp_node',
         name='deligrasp_node',
         output='screen',
         parameters=[LaunchConfiguration('gripper_config')],
-        remappings=[
-            ('/camera/camera/color/image_raw',        '/camera/gripper_camera/color/image_raw'),
-            ('/camera/camera/depth/image_rect_raw',   '/camera/gripper_camera/depth/image_rect_raw'),
-            ('/camera/camera/color/camera_info',      '/camera/gripper_camera/color/camera_info'),
-        ],
     )
 
     return LaunchDescription([

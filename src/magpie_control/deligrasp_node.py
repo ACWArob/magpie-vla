@@ -113,13 +113,13 @@ class DeliGraspNode(Node):
 
         # ── Subscriptions ───────────────────────────────────────────────────
         self.create_subscription(
-            Image, '/camera/camera/color/image_raw', self._color_cb, 10,
+            Image, '/camera/gripper_camera/color/image_raw', self._color_cb, 10,
             callback_group=self.cbg)
         self.create_subscription(
-            Image, '/camera/camera/depth/image_rect_raw', self._depth_cb, 10,
+            Image, '/camera/gripper_camera/depth/image_rect_raw', self._depth_cb, 10,
             callback_group=self.cbg)
         self.create_subscription(
-            CameraInfo, '/camera/camera/color/camera_info', self._caminfo_cb, 10,
+            CameraInfo, '/camera/gripper_camera/color/camera_info', self._caminfo_cb, 10,
             callback_group=self.cbg)
         self.create_subscription(
             PoseStamped, '/arm/tcp_pose', self._tcp_cb, 10,

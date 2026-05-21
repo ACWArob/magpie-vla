@@ -33,7 +33,7 @@ deligrasp_node:
 ur5_node:
   ros__parameters:
     robot_ip: "192.168.0.4"
-    publish_rate: 10
+    publish_rate: 500           # Hz; RTDE streams at 500 Hz — set lower to reduce CPU load
     default_linear_speed: 0.25
     default_linear_accel: 0.5
     default_joint_speed: 1.05
