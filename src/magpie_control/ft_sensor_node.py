@@ -53,7 +53,6 @@ class FTSensorNode(Node):
         """Publish force-torque reading"""
         try:
             reading = self.sensor.recv_datum()
-            
             if reading and len(reading) == 6:
                 msg = WrenchStamped()
                 msg.header.stamp = self.get_clock().now().to_msg()
@@ -64,7 +63,7 @@ class FTSensorNode(Node):
                 msg.wrench.torque.x = reading[3]
                 msg.wrench.torque.y = reading[4]
                 msg.wrench.torque.z = reading[5]
-                
+
                 self.pub_wrench.publish(msg)
         except Exception as e:
             self.get_logger().warning(f'Error reading F/T sensor: {e}')

@@ -71,7 +71,7 @@ class OptoForce:
         self.sock_r.settimeout(5)
         self.sock_r.connect(self.sensorAddr)
         self.prime_sensor()
-        self.sock_r.settimeout(0.05)  # 50ms timeout for steady-state reads
+        self.flush()  # clear config-response packets before starting read loop
 
     def prime_sensor(self):
         """ Send configuration commands to start the stream """
@@ -100,13 +100,17 @@ class OptoForce:
             self.sock_r.settimeout(0.05)
 
     def recv_datum(self):
-        """Request and read one sample from the sensor.
+        """Request and read one sample (request-response mode).
+
+        The sensor responds to individual send_01 requests; it does not stream
+        continuously. set_speed (0x0082) sets the max rate but does not trigger
+        autonomous streaming.
 
         Returns a list of 6 floats [Fx, Fy, Fz, Tx, Ty, Tz] in N / N·m,
         or an empty list on timeout.
         """
+        self.sock_r.send(self.cmd.COMMANDS['send_01'])
         try:
-            self.sock_r.send(self.cmd.COMMANDS['send_01'])  # no sleep — just fire the request
             data, _ = self.sock_r.recvfrom(RESPONS_SZ)
         except socket.timeout:
             return []

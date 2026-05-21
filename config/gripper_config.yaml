@@ -29,6 +29,8 @@ deligrasp_node:
     detector_type: "grounding_dino"  # "grounding_dino" or "owlvit"
     use_llm: false                # if true, derive object_query via OpenAI + magpie_prompts
     llm_instruction: ""           # natural language instruction, e.g. "pick up the water bottle"
+    use_gemini: false             # if true, call Gemini with camera image to set grasp params
+    gemini_task: "grasp the object"  # task description sent to Gemini with the image
 
 ur5_node:
   ros__parameters:

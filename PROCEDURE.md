@@ -954,4 +954,60 @@ After an item-by-item audit against the mentor's original list, three additional
 | Close | `ros2 service call /gripper/close std_srvs/srv/Trigger {}` | Closed to ~0mm, 1.84N contact force measured |
 | Open | `ros2 service call /gripper/open std_srvs/srv/Trigger {}` | Opened successfully |
 
+---
+
+## Day 3 — F/T Sensor, UR5 Arm, and Gemini Integration
+
+### D3-1: Network Setup Discovery
+
+The F/T sensor (192.168.0.6) and UR5 (192.168.0.4) are on a private robot subnet. Both require a **direct Ethernet connection** — WiFi routing passes ICMP (ping) but blocks UDP (F/T sensor) and the UR5 only accepts RTDE from local-subnet clients. The machine Ethernet port (`enp37s0`) must be connected to the robot network switch and receives DHCP address 192.168.0.7/24.
+
+The robot PC at 100.65.73.59 (Tailscale) is a separate machine (`humanoid`) with no ROS workspace — all ROS code runs on the lab machine.
+
+### D3-2: F/T Sensor Fix — Request-Response Mode
+
+The sensor was not publishing data. Root cause: `recv_datum()` had been changed to assume continuous streaming mode (`set_speed 0x0082`), but this sensor uses **request-response mode** — each call must send `send_01` (0x0002, 1 sample) and wait for the reply. The `set_speed` command sets the firmware rate limit but does not trigger autonomous streaming.
+
+**Fix in `ft_sensor.py`:** Restored `self.sock_r.send(self.cmd.COMMANDS['send_01'])` at the top of `recv_datum()`.
+
+**Verified:** 49.95 Hz, F/T readings non-zero at rest. ✓
+
+### D3-3: UR5 Fieldbus Conflict
+
+`RTDEControlInterface` failed with "RTDE input registers already in use." Cause: a stale `ur5_node` process from the read-only test was still running and holding the RTDE session. Fix: `kill <pid>` (by PID, not `pkill`) to allow `destroy_node` to run `servoStop()` and release the session cleanly.
+
+Secondary cause investigated: EtherNet/IP, PROFINET, and Modbus fieldbus adapters on the pendant — all confirmed already disabled. Pendant path: **Installation → Fieldbus**.
+
+**Lesson:** Always kill `ur5_node` by PID so the RTDE session is released on shutdown. A `pkill` that skips `destroy_node` leaves a zombie RTDE session that blocks the next start.
+
+### D3-4: UR5 Motion Test
+
+Set speed to 20% before any motion:
+```bash
+ros2 service call /arm/set_speed magpie_msgs/srv/SetSpeed "{speed: 0.2, acceleration: 0.2}"
+```
+
+`move_safe` succeeded — arm moved to home position [12°, −110°, 96°, −75°, −90°, 12°] at 20% speed. `move_j` verified with wrist_3 rotation. All motion services confirmed functional.
+
+### D3-5: poses.py Bug Fix
+
+`combine_rot_and_trans_from_poses()` was called inside `translate_pose()` (lines 257, 261) but was commented out at the bottom of the file. Uncommented the function definition. Would have caused `NameError` if `translate_pose` was called with `dir_pose="origin"` or a pose matrix.
+
+### D3-6: Gemini LLM Integration
+
+Added Google Gemini vision call to `deligrasp_node.py` to replace hardcoded DeliGrasp parameters. Uses `mp_prompt_tc_vision_phys` system prompt from `magpie_prompts`.
+
+**Parameters returned by LLM from camera image:**
+1. `initial_force` (N) — initial gripper contact force
+2. `additional_force` (N) — force increment per slip
+3. `spring_constant` (N/m) — object stiffness, used to compute `additional_closure`
+
+**SDK:** `google-genai` (new SDK), model `gemini-2.5-flash`. Enabled via `use_gemini: true` parameter. Requires `GEMINI_API_KEY` environment variable.
+
+**Standalone test:** `python3 scripts/test_gemini_grasp.py --task "pick up the block"`
+
+**Verified:** Gemini returned `initial_force=1.60N`, `additional_force=0.30N`, `spring_constant=1500 N/m` from a camera frame. ✓
+
+**Note:** Free tier API keys from Google Cloud Console have `limit: 0` quota. Keys must be created from **aistudio.google.com** to get free tier quota.
+
 All gripper services verified functional on hardware. See [TESTING.md](TESTING.md) for full command reference.

@@ -689,12 +689,12 @@ def pose_error( poseMeasure, poseDesired ):
 #         return err
 
 
-# def combine_rot_and_trans_from_poses(rot_pose=None, trans_pose=None):
-#     """Return a pose that is the position of `trans_pose` and the orientation of `rot_pose`"""
-#     pose = np.ones((4, 4))
-#     pose[:4, :3] = rot_pose[:4, :3]
-#     pose[:4, 3] = trans_pose[:4, 3]
-#     return pose
+def combine_rot_and_trans_from_poses(rot_pose=None, trans_pose=None):
+    """Return a pose that is the position of `trans_pose` and the orientation of `rot_pose`"""
+    pose = np.ones((4, 4))
+    pose[:4, :3] = rot_pose[:4, :3]
+    pose[:4, 3] = trans_pose[:4, 3]
+    return pose
 
 
 # def pose_from_three_poses(origin_pose, x_pose, y_pose):

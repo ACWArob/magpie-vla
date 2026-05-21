@@ -103,6 +103,9 @@ class DeliGraspNode(Node):
         # LLM: set use_llm=true and llm_instruction to derive object_query via OpenAI
         self.declare_parameter('use_llm', False)
         self.declare_parameter('llm_instruction', '')
+        # Gemini: set use_gemini=true to get grasp params from camera image via Gemini
+        self.declare_parameter('use_gemini', False)
+        self.declare_parameter('gemini_task', 'grasp the object')
 
         # ── State ───────────────────────────────────────────────────────────
         self.bridge = CvBridge()
@@ -242,6 +245,54 @@ class DeliGraspNode(Node):
         self.get_logger().info(f'LLM resolved "{instruction}" → query="{query}"')
         return query
 
+    def _gemini_grasp_params(self, task: str) -> dict:
+        """Call Gemini with current camera frame to get DeliGrasp parameters.
+
+        Returns dict with keys: initial_force (N), additional_force (N),
+        spring_constant (N/m). Falls back to node params on any failure.
+        """
+        import re, os
+        import PIL.Image
+        from google import genai
+        from google.genai import types
+        from magpie_prompts.prompts.mp_prompt_tc_vision_phys import prompt_thinker
+
+        api_key = os.environ.get('GEMINI_API_KEY', '')
+        if not api_key:
+            raise RuntimeError('GEMINI_API_KEY not set in environment')
+
+        client = genai.Client(api_key=api_key)
+        pil_img = PIL.Image.fromarray(self.color_image)   # color_image is RGB
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[task, pil_img],
+            config=types.GenerateContentConfig(system_instruction=prompt_thinker),
+        )
+        text = response.text
+        self.get_logger().info(f'Gemini response:\n{text}')
+
+        def _extract(pattern, default):
+            m = re.search(pattern, text, re.IGNORECASE)
+            return float(m.group(1)) if m else default
+
+        initial_force   = _extract(r'contact force to\s+([\d.]+)\s*Newtons',
+                                    self.get_parameter('initial_force').value)
+        additional_force = _extract(r'increase the output force by\s+([\d.]+)\s*Newtons',
+                                     self.get_parameter('additional_force').value)
+        spring_constant  = _extract(r'spring constant of\s+([\d.]+)\s*Newtons per meter',
+                                     0.0)
+
+        self.get_logger().info(
+            f'Gemini params — initial_force={initial_force:.2f}N  '
+            f'additional_force={additional_force:.2f}N  '
+            f'spring_constant={spring_constant:.1f}N/m')
+
+        return {
+            'initial_force':    initial_force,
+            'additional_force': additional_force,
+            'spring_constant':  spring_constant,
+        }
+
     def _detect(self, query, confidence):
         """Run detector. Returns (boxes, labels, scores) or raises."""
         if self.detector is None:
@@ -372,10 +423,32 @@ class DeliGraspNode(Node):
         self.get_logger().info('Executing DeliGrasp')
         params = DeliGraspParams()
         params.goal_aperture    = 30.0
-        params.initial_force    = float(self.get_parameter('initial_force').value)
-        params.additional_force = float(self.get_parameter('additional_force').value)
-        params.additional_closure = float(self.get_parameter('additional_closure').value)
         params.complete_grasp   = True
+
+        if self.get_parameter('use_gemini').value:
+            try:
+                task = self.get_parameter('gemini_task').value
+                gp = self._gemini_grasp_params(task)
+                params.initial_force    = float(gp['initial_force'])
+                params.additional_force = float(gp['additional_force'])
+                # additional_closure from spring_constant: F = k * x * damping
+                k = gp['spring_constant']
+                if k > 0:
+                    params.additional_closure = float(
+                        gp['additional_force'] / (k * 0.0001))
+                else:
+                    params.additional_closure = float(
+                        self.get_parameter('additional_closure').value)
+            except Exception as e:
+                self.get_logger().error(
+                    f'Gemini grasp params failed: {e} — using config defaults')
+                params.initial_force    = float(self.get_parameter('initial_force').value)
+                params.additional_force = float(self.get_parameter('additional_force').value)
+                params.additional_closure = float(self.get_parameter('additional_closure').value)
+        else:
+            params.initial_force    = float(self.get_parameter('initial_force').value)
+            params.additional_force = float(self.get_parameter('additional_force').value)
+            params.additional_closure = float(self.get_parameter('additional_closure').value)
 
         if not self.ac_deligrasp.wait_for_server(timeout_sec=3.0):
             raise RuntimeError('DeliGrasp action server not available')
