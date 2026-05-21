@@ -936,3 +936,22 @@ After an item-by-item audit against the mentor's original list, three additional
 | `deligrasp_node.py` subscriptions still used `/camera/camera/` | Updated to `/camera/gripper_camera/` directly in node; launch-file remappings removed |
 | `servoStop()` not called on `/arm/stop` or node shutdown | Added `ctrl.servoStop()` in `stop_callback` and `destroy_node` before `stopL`/`ur5.stop()` |
 | `publish_rate` default was 10 Hz in both config and node | Changed to 500 Hz — RTDE receive interface already initialised at 500 Hz in `ur5.py` |
+
+---
+
+## Day 2 — Physical Hardware Testing
+
+### Gripper Physical Test
+
+**Prerequisites:** Gripper powered (12V supply on), OpenRB-150 USB plugged into `/dev/ttyACM0`, `dialout` group active.
+
+**Observed results:**
+
+| Test | Command | Result |
+|---|---|---|
+| Node init | `ros2 run magpie_control gripper_node` | `/dev/ttyACM0` detected and initialized |
+| State read | `ros2 topic echo /gripper/state --once` | position=103.6mm, force=0N, temp=33.5°C |
+| Close | `ros2 service call /gripper/close std_srvs/srv/Trigger {}` | Closed to ~0mm, 1.84N contact force measured |
+| Open | `ros2 service call /gripper/open std_srvs/srv/Trigger {}` | Opened successfully |
+
+All gripper services verified functional on hardware. See [TESTING.md](TESTING.md) for full command reference.
