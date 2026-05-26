@@ -91,7 +91,7 @@ class UR5_Interface:
         self.recv       = None # -- `RTDEReceiveInterface` object
         self.gripper    = None # -- Gripper Controller Interface
         self.ft_sensor = None
-        self.Q_safe     = [ radians( elem ) for elem in [ 12.30, -110.36, 95.90, -75.48, -89.59, 12.33 ] ]
+        self.Q_safe     = [ radians( elem ) for elem in [ 34.65, -105.31, 101.03, 1.90, 38.37, 188.78 ] ]
         self.torqLim    = 600
         self.freq       = freq
         self.record     = record

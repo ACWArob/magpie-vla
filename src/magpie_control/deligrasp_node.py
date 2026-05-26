@@ -38,6 +38,61 @@ _TCP_TO_CAM = homog_xform(
     posnVctr=[0.0, 0.0, 0.120],
 )
 
+# DeliGrasp descriptor prompt — text-only, from deligrasp.github.io/assets/prompts/dg_descriptor.txt
+DG_DESCRIPTOR_PROMPT = """Control a robot gripper with force control and contact information. \
+The gripper's parameters can be adjusted corresponding to the type of object that it is trying \
+to grasp as well as the kind of grasp it is attempting to perform.
+The gripper has a measurable max force of 16N and min force of 0.15N, a maximum aperture of \
+105mm and a minimum aperture of 1mm.
+
+Some grasps may be incomplete, intended for observing force information about a given object.
+Describe the grasp strategy using the following form:
+
+[start of description]
+* This {CHOICE: [is, is not]} a new grasp.
+* In accordance with the user instruction, this grasp should be [GRASP_DESCRIPTION: <str>].
+* This is a {CHOICE: [complete, incomplete]} grasp.
+* This grasp {CHOICE: [does, does not]} contain multiple grasps.
+* This grasp is for an object with {CHOICE: [high, medium, low]} weight.
+* The object has an approximate mass of [PNUM: 0.0] grams
+* This grasp is for an object with {CHOICE: [high, medium, low]} compliance.
+* The object has an approximate spring constant of [PNUM: 0.0] Newtons per meter.
+* The gripper and object have an approximate friction coefficient of [PNUM: 0.0]
+* This grasp should set the goal aperture to [PNUM: 0.0] mm.
+* If the gripper slips, this grasp should close an additional [PNUM: 0.0] mm.
+* If the gripper slips, this grasp should increase the output force by [PNUM: 0.0] Newtons.
+* [optional] Because of [GRASP_DESCRIPTION: <str>], this grasp sets the force to be \
+{CHOICE: [lower, higher]} than the default minimum grasp force.
+[end of description]
+
+Rules:
+1. If you see phrases like {NUM: default_value}, replace the entire phrase with a numerical \
+value. If you see {PNUM: default_value}, replace it with a positive, non-zero numerical value.
+2. If you see phrases like {CHOICE: [choice1, choice2, ...]}, it means you should replace the \
+entire phrase with one of the choices listed. Be sure to replace all of them. If you are not \
+sure about the value, just use your best judgement.
+3. If you see phrases like [GRASP_DESCRIPTION: default_value], use information from the user \
+instruction to provide a description of the grasp or the object to be grasped, including \
+mentioned physical characteristics or features.
+4. Using information from the user instruction about the object and the grasp description, set \
+the initial grasp force either to this default value or an appropriate value.
+5. If you deviate from the default force value, explain your reasoning using the optional bullet \
+points. It is not common to deviate from the default value.
+6. Using knowledge of the object and how compliant it is, estimate the spring constant of the \
+object. This can range broadly from 20 N/m for a very soft object to 2000 N/m for a very stiff \
+object.
+7. Using knowledge of the object and the grasp description, if the grasp slips, first estimate \
+an appropriate increase to the aperture closure, and then the gripper output force.
+8. The increase in gripper output force the maximum value of (0.05 N, or the product of the \
+estimated aperture closure, the spring constant of the object, and a damping constant 0.1: \
+(k*additional_closure*0.0001)).
+9. Provide the full description of the grasp plan, even if you may only need to change a few \
+lines. Always start the description with [start of description] and end it with \
+[end of description].
+10. Do not add additional descriptions not shown above. Only use the bullet points given in \
+the template.
+11. Make sure to give the full description. Do not skip points if they are not optional."""
+
 
 # ── Pose conversion helpers ────────────────────────────────────────────────────
 
@@ -103,9 +158,8 @@ class DeliGraspNode(Node):
         # LLM: set use_llm=true and llm_instruction to derive object_query via OpenAI
         self.declare_parameter('use_llm', False)
         self.declare_parameter('llm_instruction', '')
-        # Gemini: set use_gemini=true to get grasp params from camera image via Gemini
-        self.declare_parameter('use_gemini', False)
-        self.declare_parameter('gemini_task', 'grasp the object')
+        # Gemini: set use_gemini=true to call Gemini with DeliGrasp descriptor prompt (text-only)
+        self.declare_parameter('use_gemini', True)
 
         # ── State ───────────────────────────────────────────────────────────
         self.bridge = CvBridge()
@@ -245,52 +299,95 @@ class DeliGraspNode(Node):
         self.get_logger().info(f'LLM resolved "{instruction}" → query="{query}"')
         return query
 
-    def _gemini_grasp_params(self, task: str) -> dict:
-        """Call Gemini with current camera frame to get DeliGrasp parameters.
+    def _parse_descriptor(self, text: str):
+        """Extract grasp fields from a DeliGrasp descriptor response.
+
+        Returns a dict of raw values, or None if any required field is missing.
+        """
+        import re
+        m = re.search(
+            r'\[start of description\](.*?)\[end of description\]',
+            text, re.DOTALL | re.IGNORECASE)
+        if not m:
+            return None
+        body = m.group(1)
+
+        def _get(pattern):
+            hit = re.search(pattern, body, re.IGNORECASE)
+            return float(hit.group(1)) if hit else None
+
+        mass_grams       = _get(r'approximate mass of ([0-9.]+) grams')
+        spring_constant  = _get(r'spring constant of ([0-9.]+) Newtons per meter')
+        friction_coeff   = _get(r'friction coefficient of ([0-9.]+)')
+        goal_aperture_mm = _get(r'goal aperture to ([0-9.]+) mm')
+        add_closure      = _get(r'close an additional ([0-9.]+) mm')
+        add_force_raw    = _get(r'increase the output force by ([0-9.]+) Newtons')
+
+        if any(v is None for v in [
+                mass_grams, spring_constant, friction_coeff,
+                goal_aperture_mm, add_closure, add_force_raw]):
+            return None
+
+        return {
+            'mass_grams':       mass_grams,
+            'spring_constant':  spring_constant,
+            'friction_coeff':   friction_coeff,
+            'goal_aperture_mm': goal_aperture_mm,
+            'additional_closure': add_closure,
+        }
+
+    def _estimate_params_from_descriptor(self, object_name: str):
+        """Call Gemini text-only with the DeliGrasp descriptor prompt.
 
         Returns dict with keys: initial_force (N), additional_force (N),
-        spring_constant (N/m). Falls back to node params on any failure.
+        additional_closure (mm), goal_aperture_mm (mm). Returns None on failure.
         """
-        import re, os
-        import PIL.Image
+        import os
         from google import genai
         from google.genai import types
-        from magpie_prompts.prompts.mp_prompt_tc_vision_phys import prompt_thinker
 
         api_key = os.environ.get('GEMINI_API_KEY', '')
         if not api_key:
             raise RuntimeError('GEMINI_API_KEY not set in environment')
 
         client = genai.Client(api_key=api_key)
-        pil_img = PIL.Image.fromarray(self.color_image)   # color_image is RGB
+        user_message = f'Pick up the {object_name}.'
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=[task, pil_img],
-            config=types.GenerateContentConfig(system_instruction=prompt_thinker),
+            contents=user_message,
+            config=types.GenerateContentConfig(system_instruction=DG_DESCRIPTOR_PROMPT),
         )
         text = response.text
-        self.get_logger().info(f'Gemini response:\n{text}')
+        self.get_logger().info(f'Gemini descriptor for "{object_name}":\n{text}')
 
-        def _extract(pattern, default):
-            m = re.search(pattern, text, re.IGNORECASE)
-            return float(m.group(1)) if m else default
+        parsed = self._parse_descriptor(text)
+        if parsed is None:
+            self.get_logger().error('Descriptor parse failed — response missing required fields')
+            return None
 
-        initial_force   = _extract(r'contact force to\s+([\d.]+)\s*Newtons',
-                                    self.get_parameter('initial_force').value)
-        additional_force = _extract(r'increase the output force by\s+([\d.]+)\s*Newtons',
-                                     self.get_parameter('additional_force').value)
-        spring_constant  = _extract(r'spring constant of\s+([\d.]+)\s*Newtons per meter',
-                                     0.0)
+        # Physics from the DeliGrasp paper
+        mass_kg       = parsed['mass_grams'] / 1000.0
+        friction      = max(parsed['friction_coeff'], 1e-6)
+        initial_force = min(16.0, max(0.15, (mass_kg * 9.81) / friction))
+        add_closure   = parsed['additional_closure']
+        k             = parsed['spring_constant']
+        add_force     = max(0.05, add_closure * k * 0.0001)
 
         self.get_logger().info(
-            f'Gemini params — initial_force={initial_force:.2f}N  '
-            f'additional_force={additional_force:.2f}N  '
-            f'spring_constant={spring_constant:.1f}N/m')
+            f'Descriptor — object="{object_name}"  '
+            f'mass={parsed["mass_grams"]:.0f}g  '
+            f'k={k:.0f}N/m  '
+            f'μ={parsed["friction_coeff"]:.2f}  '
+            f'aperture={parsed["goal_aperture_mm"]:.1f}mm  '
+            f'add_closure={add_closure:.1f}mm  '
+            f'initial_force={initial_force:.2f}N  '
+            f'add_force={add_force:.3f}N')
 
         return {
             'initial_force':    initial_force,
-            'additional_force': additional_force,
-            'spring_constant':  spring_constant,
+            'additional_force': add_force,
+            'additional_closure': add_closure,
+            'goal_aperture_mm': parsed['goal_aperture_mm'],
         }
 
     def _detect(self, query, confidence):
@@ -427,21 +524,16 @@ class DeliGraspNode(Node):
 
         if self.get_parameter('use_gemini').value:
             try:
-                task = self.get_parameter('gemini_task').value
-                gp = self._gemini_grasp_params(task)
+                gp = self._estimate_params_from_descriptor(query)
+                if gp is None:
+                    raise RuntimeError('Descriptor parsing returned None')
                 params.initial_force    = float(gp['initial_force'])
                 params.additional_force = float(gp['additional_force'])
-                # additional_closure from spring_constant: F = k * x * damping
-                k = gp['spring_constant']
-                if k > 0:
-                    params.additional_closure = float(
-                        gp['additional_force'] / (k * 0.0001))
-                else:
-                    params.additional_closure = float(
-                        self.get_parameter('additional_closure').value)
+                params.additional_closure = float(gp['additional_closure'])
+                params.goal_aperture    = float(gp['goal_aperture_mm'])
             except Exception as e:
                 self.get_logger().error(
-                    f'Gemini grasp params failed: {e} — using config defaults')
+                    f'Gemini descriptor failed: {e} — using config defaults')
                 params.initial_force    = float(self.get_parameter('initial_force').value)
                 params.additional_force = float(self.get_parameter('additional_force').value)
                 params.additional_closure = float(self.get_parameter('additional_closure').value)
