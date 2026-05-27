@@ -560,6 +560,83 @@ python3 ~/magpie_control/scripts/test_dryrun_analyze.py \
 
 ---
 
+## Stage 5f — Safety Pre-flight + Auto Object Identification (2026-05-27)
+
+Tests the hardened dry-run script: tunable motion params, hard abort on unsafe poses, and Gemini-based auto object identification.
+
+**Prerequisites:**
+- Camera node running
+- SAM3 background server running (`/tmp/sam3.sock` exists)
+- `GEMINI_API_KEY` exported
+
+---
+
+### Test A — Auto object identification (no `--object` flag)
+
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+export GEMINI_API_KEY=your_key
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py \
+  --detector sam3 --socket --pcd
+```
+
+**Expected output:**
+```
+No --object specified. Asking Gemini to identify the object...
+  Detected object: "<object name>"
+Running SAM3 (socket ~1s) + descriptor for "<object name>" in parallel...
+```
+Then the full detection + point cloud + safety + grip params output as normal.
+
+---
+
+### Test B — Safety pre-flight check output
+
+With a detected object, the output should include:
+
+```
+  Motion params: approach_height=0.100 m  grasp_offset=0.020 m
+  Approach: fingertip Z=X.XXX m  TCP Z=X.XXX m
+  Grasp:    fingertip Z=X.XXX m  TCP Z=X.XXX m
+
+=== SAFETY PRE-FLIGHT ===
+  Floor limit: 0.047 m  (closed-gripper floor, applies to all poses)
+  Approach fingertip Z: X.XXX m  ✓ SAFE
+  Grasp    fingertip Z: X.XXX m  ✓ SAFE
+=========================
+```
+
+**If object is too close to the floor**, both lines show `✗ UNSAFE` and the script exits with:
+```
+ABORTED — arm would crash into floor with these parameters.
+Adjust --approach-height / --grasp-offset, or move object higher.
+```
+
+---
+
+### Test C — Custom motion params
+
+```bash
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py \
+  --detector sam3 --socket --pcd \
+  --approach-height 0.15 --grasp-offset 0.01
+```
+
+**Expected:** safety check uses 0.15 m and 0.01 m values (not hardcoded 0.10/0.02).
+
+---
+
+### Floor limit constants
+
+| Constant | Value | Source |
+|---|---|---|
+| `MIN_FINGERTIP_Z` | 0.047 m | Teach mode measurement 2026-05-27 |
+| `GRIPPER_LENGTH` | 0.231 m | `magpie_tooltip[2]` in ur5.py |
+
+Both constants must match between `deligrasp_node.py` and `test_dryrun_analyze.py`.
+
+---
+
 ## Stage 6 — Arm + Gripper (coordinated motion)
 
 **Hardware required:** UR5 powered + initialized, MAGPIE gripper mounted on end-effector (12V + USB). Ethernet to robot network. **Clear the area around the arm before running.**

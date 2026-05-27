@@ -1439,3 +1439,102 @@ python3 ~/magpie_control/scripts/test_dryrun_analyze.py \
 ```
 
 **Requires:** `--detector sam3` (needs pixel mask). Falls back gracefully with a warning if open3d is unavailable or mask is empty.
+
+---
+
+## Day 5B — Safety Hardening + Gripper Close Drop (2026-05-27)
+
+### D5B-1: Dry-Run Script — Tunable Motion Parameters + Hard Safety Abort
+
+Previously the dry-run script had `APPROACH_H = 0.10` and `GRASP_OFF = 0.02` hardcoded. If someone ran the real node with different ROS params (`--ros-args -p approach_height:=0.05`), the dry-run safety check would use the wrong numbers and give a false OK.
+
+**Changes to `scripts/test_dryrun_analyze.py`:**
+- Added `--approach-height` (default 0.10 m) and `--grasp-offset` (default 0.02 m) CLI flags
+- Safety check now uses these values so it always mirrors whatever you'd pass to the node
+- Negative values rejected immediately before ROS even starts
+- Safety check changed from a **warning** to a **hard abort** (`sys.exit(1)`) — prints which pose failed and how to fix it, then exits. No longer possible to read the results and ignore an unsafe destination
+- Safety constants (`GRIPPER_LENGTH`, `MIN_FINGERTIP_Z`) moved to module level with a comment: "MUST match deligrasp_node.py"
+
+**Usage:**
+```bash
+# Mirror the node's ROS params exactly
+python3 scripts/test_dryrun_analyze.py \
+  --detector sam3 --socket --pcd \
+  --approach-height 0.10 --grasp-offset 0.02
+```
+
+---
+
+### D5B-2: Auto Object Identification from Camera
+
+Previously `--object` was required (defaulted to `"block"`). Now if omitted, Gemini Vision identifies the main graspable object in the camera frame before the pipeline starts.
+
+**How it works:**
+1. Grab one camera frame after sensor data is received
+2. Send JPEG to Gemini 2.5 Flash: *"What is the main graspable object in this image? Reply in 2–4 words."*
+3. Print `Detected object: "..."` and use that name for the rest of the pipeline (detection, descriptor, point cloud)
+4. Hard abort if Gemini cannot identify anything
+
+**Usage:**
+```bash
+# Let Gemini identify the object:
+python3 scripts/test_dryrun_analyze.py --detector sam3 --socket --pcd
+
+# Specify explicitly (unchanged):
+python3 scripts/test_dryrun_analyze.py --detector sam3 --socket --pcd --object "measuring tape"
+```
+
+---
+
+### D5B-3: Floor Safety Limit — Gripper Close Drop Measured
+
+**Problem:** When the gripper closes, the fingers rotate on an arc (Dynamixel pivot geometry). The fingertips arc downward slightly as they close. The safety check was not accounting for this — it only checked the TCP-based fingertip Z before closing, not what happens during the close.
+
+**Measurement procedure (teach mode):**
+1. Open gripper fully (both fingers symmetric at ~103 mm aperture)
+2. Moved arm to lowest safe position with gripper open → TCP = 0.261 m → fingertip = 0.030 m
+3. Closed gripper (reset_parameters + calibrate + close to get both fingers symmetric)
+4. Moved arm to lowest safe position with gripper closed → TCP = 0.282 m → fingertip = 0.051 m
+5. Close drop = 0.051 − 0.030 = **21 mm**
+
+**Simplification:** Rather than tracking open vs. closed limits separately (with a `GRIPPER_CLOSE_DROP` parameter), a single floor limit was set to cover both:
+- `MIN_FINGERTIP_Z = 0.047 m` — applies to all poses (approach, grasp, retreat)
+- Any pose that would put TCP-based fingertip Z below 0.047 m is rejected before any movement
+
+This means the arm never approaches a height where closing the gripper could hit the floor, regardless of the current pose.
+
+**Updated in both `deligrasp_node.py` and `scripts/test_dryrun_analyze.py`.**
+
+---
+
+### D5B-4: Gripper USB Re-enumeration Recovery
+
+**Problem encountered:** The OpenRB-150 controller re-enumerated from `/dev/ttyACM1` to `/dev/ttyACM0` after a USB reconnect during the session. The `gripper_node` had opened `/dev/ttyACM1` at startup and was now flooding `[TxRxResult] Port is in use!` — the service returned `success: True` but nothing moved.
+
+**Diagnosis:** `temperature: 0.0` in `/gripper/state` is the indicator — real AX-12 motors always report ~33–45°C. Zero means the node is not talking to hardware.
+
+**Recovery:**
+```bash
+# 1. Kill the stale node
+kill <gripper_node_pid>
+
+# 2. Restart — auto-detection finds the new port
+sg dialout -c "bash -c 'source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash && ros2 run magpie_control gripper_node'"
+```
+
+**Additional symptom found:** After restart, one finger was not moving (asymmetric finger positions in `/gripper/state`). Fixed by:
+```bash
+ros2 service call /gripper/reset_parameters std_srvs/srv/Trigger {}
+ros2 service call /gripper/calibrate std_srvs/srv/Trigger {}
+```
+Both fingers returned to symmetric operation (~50 mm each when open, total ~103 mm).
+
+**Root cause:** The `reset_parameters` + `calibrate` sequence re-homes both motors from a known position. If one motor has a stale overload flag from the port conflict, this clears it.
+
+**Note:** `temperature > 0` in `/gripper/state` is the quickest way to confirm the node is actually talking to hardware. If it reads 0.0 after startup, suspect a port mismatch.
+
+---
+
+### TODO: MuJoCo Collision Checking
+
+The UR5 has a publicly available MuJoCo XML model (MJCF). In the future, this can be loaded into a collision-checking pipeline to give per-pose floor and obstacle clearance based on the full kinematic chain rather than the single fingertip Z heuristic. Parked for now — current safety checks are sufficient for tabletop operation.

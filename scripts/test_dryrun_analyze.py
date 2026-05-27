@@ -22,6 +22,11 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+# ── Safety constants — MUST match deligrasp_node.py ──────────────────────────
+GRIPPER_LENGTH  = 0.231   # m  wrist flange → fingertip
+MIN_FINGERTIP_Z = 0.047   # m  floor limit (closed gripper, teach mode 2026-05-27)
+# ─────────────────────────────────────────────────────────────────────────────
+
 import cv2
 import numpy as np
 import rclpy
@@ -372,9 +377,26 @@ def call_descriptor(object_name, api_key):
                 closure_mm=closure, initial_force=initial_force, add_force=add_force)
 
 
+def identify_object(image_rgb, api_key):
+    """Ask Gemini what the main graspable object in the scene is. Returns a short name string."""
+    import cv2 as _cv2
+    _, buf = _cv2.imencode('.jpg', _cv2.cvtColor(image_rgb, _cv2.COLOR_RGB2BGR))
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=[
+            types.Part.from_bytes(data=buf.tobytes(), mime_type='image/jpeg'),
+            'What is the main graspable object in this image? '
+            'Reply with only the object name, 2-4 words maximum, no punctuation.',
+        ],
+    )
+    return response.text.strip().lower()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--object', default='block', help='Object name for detection and descriptor')
+    parser.add_argument('--object', default=None, help='Object name for detection and descriptor. '
+                        'If omitted, Gemini identifies the object from the camera feed automatically.')
     parser.add_argument('--confidence', type=float, default=0.3, help='Detection confidence threshold (grounding_dino only)')
     parser.add_argument('--detector', default='grounding_dino',
                         choices=['grounding_dino', 'gemini', 'sam3'],
@@ -389,7 +411,21 @@ def main():
                         help='SAM3 only: build segmented point cloud, run PCA, print centroid + grasp angle')
     parser.add_argument('--save-image', default='/tmp/dryrun_detection.jpg',
                         help='Path to save annotated detection image')
+    parser.add_argument('--approach-height', type=float, default=0.10, metavar='M',
+                        help='Approach height above object in metres (default 0.10). '
+                             'Must match --ros-args -p approach_height:=X passed to the node.')
+    parser.add_argument('--grasp-offset', type=float, default=0.02, metavar='M',
+                        help='How far below object surface fingertips descend for mid-grip (default 0.02). '
+                             'Must match --ros-args -p grasp_z_offset:=X passed to the node.')
     args = parser.parse_args()
+
+    # ── Validate motion params before doing anything else ─────────────────────
+    if args.approach_height < 0:
+        print(f'ERROR: --approach-height {args.approach_height} m is negative — arm would go below object.')
+        sys.exit(1)
+    if args.grasp_offset < 0:
+        print(f'ERROR: --grasp-offset {args.grasp_offset} m is negative — would lift instead of descend.')
+        sys.exit(1)
 
     api_key = os.environ.get('GEMINI_API_KEY', '')
     if not api_key:
@@ -421,6 +457,18 @@ def main():
     print(f'Image:   {color.shape[1]}x{color.shape[0]} px')
     print(f'Depth:   {depth.shape[1]}x{depth.shape[0]} px  '
           f'range {depth[depth>0].min() if (depth>0).any() else 0}–{depth.max()} mm\n')
+
+    # ── 1b. Auto-identify object if not specified ─────────────────────────────
+    if args.object is None:
+        print('No --object specified. Asking Gemini to identify the object...')
+        try:
+            args.object = identify_object(color, api_key)
+            print(f'  Detected object: "{args.object}"')
+        except Exception as e:
+            print(f'  ERROR: Could not auto-identify object: {e}')
+            node.destroy_node()
+            rclpy.shutdown()
+            sys.exit(1)
 
     # ── 2. SAM3 warm server startup (before thread pool, so cold load is timed separately) ──
     sam3_proc = None
@@ -529,10 +577,35 @@ def main():
             print(f'  Camera-frame pos:   x={p_cam[0]*100:.1f}  y={p_cam[1]*100:.1f}  z={p_cam[2]*100:.1f} cm')
             print(f'  World-frame pos:    x={world_pos[0]:.3f}  y={world_pos[1]:.3f}  z={world_pos[2]:.3f} m')
 
-            approach_z = world_pos[2] + 0.10
-            grasp_z    = world_pos[2] + 0.02
-            print(f'\n  Approach pose Z:    {approach_z:.3f} m  (10 cm above object)')
-            print(f'  Grasp pose Z:       {grasp_z:.3f} m   (2 cm above object)')
+            # Fingertip target Z (what touches / hovers near the object)
+            approach_fz = world_pos[2] + args.approach_height   # hover above object
+            grasp_fz    = world_pos[2] - args.grasp_offset       # descend into object for mid-grip
+
+            # TCP Z = fingertip_z + GRIPPER_LENGTH (wrist is above fingertips)
+            approach_tcp_z = approach_fz + GRIPPER_LENGTH
+            grasp_tcp_z    = grasp_fz    + GRIPPER_LENGTH
+
+            print(f'\n  Motion params: approach_height={args.approach_height:.3f} m  '
+                  f'grasp_offset={args.grasp_offset:.3f} m')
+            print(f'  Approach: fingertip Z={approach_fz:.3f} m  TCP Z={approach_tcp_z:.3f} m')
+            print(f'  Grasp:    fingertip Z={grasp_fz:.3f} m  TCP Z={grasp_tcp_z:.3f} m')
+
+            # ── Pre-flight safety check — hard abort if unsafe ────────────────
+            approach_safe = approach_fz >= MIN_FINGERTIP_Z
+            grasp_safe    = grasp_fz    >= MIN_FINGERTIP_Z
+            print(f'\n=== SAFETY PRE-FLIGHT ===')
+            print(f'  Floor limit: {MIN_FINGERTIP_Z:.3f} m  (closed-gripper floor, applies to all poses)')
+            print(f'  Approach fingertip Z: {approach_fz:.3f} m  '
+                  f'{"✓ SAFE" if approach_safe else "✗ UNSAFE — TOO LOW"}')
+            print(f'  Grasp    fingertip Z: {grasp_fz:.3f} m  '
+                  f'{"✓ SAFE" if grasp_safe else "✗ UNSAFE — TOO LOW (finger close drop not accounted)"}')
+            print(f'=========================')
+            if not approach_safe or not grasp_safe:
+                print('\nABORTED — arm would crash into floor with these parameters.')
+                print('Adjust --approach-height / --grasp-offset, or move object higher.')
+                node.destroy_node()
+                rclpy.shutdown()
+                sys.exit(1)
 
     # Save annotated image
     cv2.imwrite(args.save_image, annotated)
@@ -547,7 +620,7 @@ def main():
             k = caminfo.k
             pts_raw, pcd_raw = build_segmented_pcd(seg_mask, depth, k, tcp, _TCP_TO_CAM)
             pcd_clean, pts_clean = denoise_pcd(pcd_raw)
-            result = analyse_pcd(pts_clean)
+            result = analyse_pcd(pcd_clean)
             print_pcd_results(result, len(pts_clean))
         except Exception as e:
             print(f'  [WARN] Point cloud analysis failed: {e}')

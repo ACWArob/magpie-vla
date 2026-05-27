@@ -51,6 +51,37 @@ _TCP_TO_CAM = homog_xform(
 # intended height, not the wrist.
 GRIPPER_LENGTH = 0.231  # metres — wrist flange to fingertip (matches magpie_tooltip[2] in ur5.py)
 
+# Lowest safe fingertip Z — measured 2026-05-27 in teach mode.
+# Closed gripper at floor limit: TCP=0.282 m → fingertip=0.051 m. Adjusted to 0.047 m.
+# Used for ALL poses (approach, grasp, retreat) so the arm never reaches a height
+# where closing the gripper could hit the floor.
+MIN_FINGERTIP_Z = 0.047  # metres
+
+
+def fingertip_world_pos(tcp_matrix):
+    """Return fingertip XYZ in world frame for any gripper orientation.
+    Works for tilted grasps: fingertip = TCP_pos + tool_Z_axis * GRIPPER_LENGTH.
+    """
+    tool_z_world = tcp_matrix[:3, 2]  # tool Z column — points toward fingertips
+    return tcp_matrix[:3, 3] + tool_z_world * GRIPPER_LENGTH
+
+
+def _straight_down_rotation(grasp_angle_deg=0.0):
+    """3×3 rotation for straight-down approach, wrist rotated by grasp_angle_deg."""
+    theta = np.radians(grasp_angle_deg)
+    c, s = np.cos(theta), np.sin(theta)
+    return np.array([[c, s, 0], [s, -c, 0], [0, 0, -1]])
+
+
+def check_pose_safe(tcp_matrix, label='pose'):
+    """Raise ValueError if fingertip would go below MIN_FINGERTIP_Z."""
+    fingertip = fingertip_world_pos(tcp_matrix)
+    if fingertip[2] < MIN_FINGERTIP_Z:
+        raise ValueError(
+            f'{label}: fingertip Z={fingertip[2]:.3f} m would go below '
+            f'floor limit {MIN_FINGERTIP_Z:.3f} m'
+        )
+
 # DeliGrasp descriptor prompt — text-only, from deligrasp.github.io/assets/prompts/dg_descriptor.txt
 DG_DESCRIPTOR_PROMPT = """Control a robot gripper with force control and contact information. \
 The gripper's parameters can be adjusted corresponding to the type of object that it is trying \
@@ -614,6 +645,33 @@ class DeliGraspNode(Node):
         T = self.tcp_matrix @ _TCP_TO_CAM
         return (T @ np.array([*p_cam, 1.0]))[:3]
 
+    def _analyse_grasp_angle(self, seg_mask):
+        """Build point cloud from seg_mask + depth, run PCA, return grasp_angle_deg.
+        Returns None on failure (caller falls back to default orientation)."""
+        try:
+            import sys as _sys
+            import os as _os
+            _scripts = _os.path.expanduser('~/magpie_control/scripts')
+            if _scripts not in _sys.path:
+                _sys.path.insert(0, _scripts)
+            from pointcloud_utils import build_segmented_pcd, denoise_pcd, analyse_pcd
+            k = self.camera_info.k
+            pts_raw, pcd_raw = build_segmented_pcd(
+                seg_mask, self.depth_image, k, self.tcp_matrix, _TCP_TO_CAM)
+            _, pts_clean = denoise_pcd(pcd_raw)
+            if len(pts_clean) < 10:
+                return None
+            result = analyse_pcd(pts_clean)
+            angle = result['grasp_angle_deg']
+            extent = result['extent_m']
+            self.get_logger().info(
+                f'PCA: grasp_angle={angle:.1f}° '
+                f'extent=[{extent[0]*100:.1f}, {extent[1]*100:.1f}, {extent[2]*100:.1f}] cm')
+            return angle
+        except Exception as e:
+            self.get_logger().warning(f'PCA grasp angle failed: {e} — using default orientation')
+            return None
+
     # ── Service helpers ────────────────────────────────────────────────────────
 
     def _call(self, client, request, timeout=5.0):
@@ -711,35 +769,43 @@ class DeliGraspNode(Node):
         self.get_logger().info(
             f'Object world position: x={p_world[0]:.3f} y={p_world[1]:.3f} z={p_world[2]:.3f} m')
 
-        # ── 3. Open gripper ────────────────────────────────────────────────
+        # ── 3. PCA grasp angle (SAM3 mask → point cloud → wrist rotation) ───
+        grasp_angle_deg = 0.0
+        if seg_mask is not None and seg_mask.any():
+            grasp_angle_deg = self._analyse_grasp_angle(seg_mask) or 0.0
+
+        # ── 4. Open gripper ────────────────────────────────────────────────
         self.get_logger().info('Opening gripper')
         self._call(self.cli_open, Trigger.Request())
         time.sleep(0.3)
 
-        # ── 4. Move to approach pose ───────────────────────────────────────
-        # TCP must be GRIPPER_LENGTH above the fingertip target.
-        # Approach: fingertips approach_h above block top surface.
-        # TCP z = block_z + approach_h + GRIPPER_LENGTH
-        approach = np.array(self.tcp_matrix)
+        # ── 5. Move to approach pose ───────────────────────────────────────
+        # Orientation: straight down, wrist rotated by PCA grasp angle so
+        # fingers grip perpendicular to the object's major axis.
+        # TCP z = object_z + approach_h + GRIPPER_LENGTH
+        approach = np.eye(4)
+        approach[:3, :3] = _straight_down_rotation(grasp_angle_deg)
         approach[0, 3] = p_world[0]
         approach[1, 3] = p_world[1]
         approach[2, 3] = p_world[2] + approach_h + GRIPPER_LENGTH
 
+        check_pose_safe(approach, 'approach')
         self.get_logger().info(
             f'Approach TCP z={approach[2,3]:.3f} m  '
             f'(fingertips at z={p_world[2]+approach_h:.3f} m)')
         self._move_l(approach, speed=0.15, accel=0.3)
 
-        # ── 5. Descend to grasp pose ───────────────────────────────────────
+        # ── 6. Descend to grasp pose ───────────────────────────────────────
         # Grasp: fingertips graze_off below block top surface for a mid-block grip.
         # TCP z = block_z - grasp_off + GRIPPER_LENGTH
         grasp = approach.copy()
         grasp[2, 3] = p_world[2] - grasp_off + GRIPPER_LENGTH
 
+        check_pose_safe(grasp, 'grasp')
         self.get_logger().info('Descending to grasp pose')
         self._move_l(grasp, speed=0.05, accel=0.1)
 
-        # ── 6. DeliGrasp ──────────────────────────────────────────────────
+        # ── 7. DeliGrasp ──────────────────────────────────────────────────
         self.get_logger().info('Executing DeliGrasp')
         params = DeliGraspParams()
         params.goal_aperture    = 30.0
@@ -785,10 +851,11 @@ class DeliGraspNode(Node):
             f'Grasped — aperture={result.final_aperture:.1f}mm '
             f'force={result.final_force:.2f}N')
 
-        # ── 7. Retreat ────────────────────────────────────────────────────
+        # ── 8. Retreat ────────────────────────────────────────────────────
         self.get_logger().info('Retreating')
         retreat = grasp.copy()
         retreat[2, 3] = p_world[2] + approach_h + GRIPPER_LENGTH
+        check_pose_safe(retreat, 'retreat')
         self._move_l(retreat, speed=0.10, accel=0.2)
 
     def _safe_abort(self):
