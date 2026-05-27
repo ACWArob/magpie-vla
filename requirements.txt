@@ -1,12 +1,47 @@
-dynamixel-sdk==3.7.31
-numpy==1.26.1
-py-trees==2.1.6
-spatialmath-python>=1.0
-splines>=0.2
-open3d==0.17.0
-pyrealsense2==2.54.2.5684
-Pillow==10.1.0
-ur-rtde==1.5.7
-pyserial==3.5
-psutil>=5.0
-rerun>=1.0
+# ============================================================
+# magpie_control — Python 3.10 (ROS 2 Humble) dependencies
+# ============================================================
+# Install:
+#   pip install -r requirements.txt
+#
+# For GPU-accelerated Grounding DINO (RTX 2070 / CUDA 12.x):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+# For CPU-only:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# --- Hardware drivers ---
+dynamixel-sdk==3.7.31          # AX12-A Dynamixel motors (MAGPIE gripper)
+ur-rtde==1.5.7                 # UR5 RTDE interface (arm control)
+pyserial==3.5                  # Serial port access (gripper USB)
+pyrealsense2==2.54.2.5684      # Intel RealSense D405 (Python SDK, optional — use ROS driver instead)
+
+# --- Vision and ML ---
+transformers>=4.44.0           # Grounding DINO (IDEA-Research/grounding-dino-tiny)
+Pillow>=9.1.0                  # Image I/O (transformers minimum version)
+opencv-python-headless>=4.8.0  # Image encoding for Gemini API, CV overlays
+numpy>=1.24,<2.0               # Core numerical (SAM3 requires <2; keep consistent)
+
+# --- Gemini / LLM ---
+google-genai>=1.0              # Gemini 2.5 Flash — DeliGrasp descriptor + VLM detection
+
+# --- Robotics utilities ---
+spatialmath-python>=1.0        # SE3 transforms, rotation matrices
+splines>=0.2                   # Trajectory splines
+psutil>=5.0                    # USB speed check (lsusb wrapper)
+
+# --- Visualization ---
+open3d==0.17.0                 # Point cloud visualization (optional)
+rerun>=1.0                     # Live data streaming visualization (optional)
+
+# --- Misc ---
+py-trees==2.1.6                # Behaviour trees (future use)
+
+
+# ============================================================
+# sam3_env — Python 3.12 (isolated venv for SAM3)
+# ============================================================
+# These packages MUST be installed in ~/sam3_env, NOT the ROS env.
+# Setup:
+#   python3.12 -m venv ~/sam3_env
+#   ~/sam3_env/bin/pip install -r sam3_requirements.txt
+# See sam3_requirements.txt for the full list.

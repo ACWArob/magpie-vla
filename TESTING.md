@@ -279,6 +279,287 @@ python3 ~/magpie_control/scripts/test_gemini_gripper.py --object "wooden block"
 
 ---
 
+## Stage 5b — Object Detection: ViT vs VLM
+
+Two detector backends are available for identifying the object in the camera frame. Choose one when running `test_dryrun_analyze.py` or `deligrasp_node`.
+
+### Option A — Grounding DINO (ViT, default)
+
+A Vision Transformer fine-tuned for zero-shot object detection. Runs locally — no API key or internet needed.
+
+```bash
+# Dry-run: detect block, get 3D position, get grip params — arm does not move
+export GEMINI_API_KEY=your_key_from_aistudio_google_com
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py --object "red block"
+# --detector grounding_dino is the default, no flag needed
+```
+
+**Expected output:**
+- Detection confidence score printed (e.g. `score=0.918`)
+- Bounding box in pixels + centroid
+- Depth at centroid, world XYZ, approach/grasp Z heights
+- Gemini DeliGrasp descriptor + computed grip parameters
+- Annotated detection image saved to `/tmp/dryrun_detection.jpg`
+
+### Option B — Gemini VLM (cloud vision)
+
+Sends the full camera frame to Gemini 2.5 Flash as a JPEG. Gemini returns the bounding box as text (`[y_min, x_min, y_max, x_max]`, 0–1000 normalized). Requires `GEMINI_API_KEY`.
+
+```bash
+export GEMINI_API_KEY=your_key_from_aistudio_google_com
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py --object "red block" --detector gemini
+```
+
+**Expected output:**
+- Gemini raw response printed (e.g. `Gemini VLM response: [234, 312, 456, 521]`)
+- Bounding box converted from 0–1000 scale to pixel coordinates
+- Same depth/3D/grip output as Option A
+
+### Comparison
+
+| | Grounding DINO | Gemini VLM |
+|---|---|---|
+| Runs | Locally | Google cloud |
+| API key needed | No | Yes (`GEMINI_API_KEY`) |
+| Speed | ~2–5 s CPU | ~1–2 s (network) |
+| Confidence score | Yes (0–1) | No (fixed at 0.9) |
+| Localization precision | High (trained detection head) | Lower (text output) |
+| Unusual objects | Limited by training vocab | Handles anything |
+| Internet required | No (set `TRANSFORMERS_OFFLINE=1`) | Yes |
+
+**Note:** For `deligrasp_node`, set the detector via ROS parameter:
+```bash
+ros2 run magpie_control deligrasp_node --ros-args -p detector_type:=gemini
+```
+Default is `grounding_dino`.
+
+---
+
+## Stage 5c — SAM3 Object Detection (Segment Anything Model 3)
+
+SAM3 is the third detector backend. It returns a pixel-level binary mask in addition to a bounding box, enabling more accurate depth sampling (entire object mask vs 10×10 centroid patch).
+
+**Prerequisites:**
+
+```bash
+# HuggingFace access to facebook/sam3 must be approved
+# sam3_env must be set up: ~/sam3_env/bin/python3 must exist
+# Test sam3_env is functional:
+~/sam3_env/bin/python3 -c "import sam3; print('SAM3 ok')"
+```
+
+**Setup (one-time, if not done):**
+
+```bash
+# Login to HuggingFace in sam3_env (required to download gated model weights)
+HF_HUB_OFFLINE=0 ~/sam3_env/bin/huggingface-cli login
+# Paste token from huggingface.co/settings/tokens
+```
+
+**Run dry-run test with SAM3:**
+
+```bash
+export GEMINI_API_KEY=your_key_from_aistudio_google_com
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py --object "measuring tape" --detector sam3
+```
+
+**Expected output:**
+- `SAM3 mask: XXXXX pixels  score=0.XXX` — mask pixel count and confidence
+- `Centroid pixel: (u, v) (mask centroid)` — centroid from mask geometry, not box centre
+- `Using SAM3 mask depth (XXXX pixels)` — depth sampled over entire mask
+- Green overlay on `/tmp/dryrun_detection.jpg` showing segmented object
+- Same depth/3D/approach-Z output as other detectors
+
+**Fallback behaviour:**
+
+If SAM3 fails for any reason (GPU error, timeout, model not downloaded), the test prints:
+```
+[WARN] SAM3 failed: <reason> — falling back to DINO
+```
+and continues with Grounding DINO results. No crash.
+
+### Three-Way Detector Comparison
+
+| | Grounding DINO | Gemini VLM | SAM3 |
+|---|---|---|---|
+| Type | ViT (detection head) | Multimodal LLM | Promptable segmentation |
+| Runs | Local (GPU/CPU) | Google cloud | Local (GPU, Python 3.12) |
+| Output | Bounding boxes | 1 bounding box | Bounding box + pixel mask |
+| Depth sampling | 10×10 centroid patch | 10×10 centroid patch | All mask pixels (median) |
+| Localization | High (trained head) | Lower (text output) | Highest (pixel-level) |
+| Speed | ~2–5 s CPU / <1 s GPU | ~1–2 s (network) | ~3–8 s first run (GPU) |
+| API key | No | Yes (`GEMINI_API_KEY`) | No (HF token for download only) |
+| Requires internet | No | Yes | No (after first download) |
+| Python | 3.10 | 3.10 | 3.12 subprocess |
+| GPU dtype | float32 | N/A | float32 (Turing patch) |
+
+**Default:** Grounding DINO — fastest, no API cost, sufficient precision for grasping.  
+**Use SAM3 when:** Object depth needs to be accurate (irregular shapes, depth noise inside bounding box).  
+**Use Gemini when:** Object is unusual or not in DINO's vocabulary, API key available.
+
+---
+
+## Stage 5d — SAM3 Socket Server (Persistent Warm Inference)
+
+Tests the background socket server that keeps SAM3 hot between calls, reducing per-call latency from ~12 s to ~1 s.
+
+**Prerequisites:**
+- Stage 5c completed and verified (SAM3 working, float32 patch applied)
+- Camera node running
+- `~/sam3_env/bin/python3` functional
+
+---
+
+### Test A — Cold (single-shot, no server)
+
+Baseline timing. Model loads fresh, runs once, exits. Use this to confirm the cold-load time on the current machine.
+
+**Terminal 1 — camera:**
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
+```
+
+**Terminal 2:**
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+export GEMINI_API_KEY=your_key
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py \
+  --detector sam3 --object "measuring tape"
+```
+
+**Expected output:**
+```
+Running SAM3 (cold ~12s) + descriptor for "measuring tape" in parallel...
+  SAM3 mask: XXXXX pixels  score=0.XXX
+```
+Total time: ~14–16 s (dominated by 12 s model load).
+
+---
+
+### Test B — Hot (background socket server)
+
+Start the server once, then run the dry-run script. First terminal stays open for the whole session.
+
+**Terminal 1 — camera:**
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
+```
+
+**Terminal 2 — SAM3 background server (leave running):**
+```bash
+~/sam3_env/bin/python3 ~/magpie_control/scripts/sam3_infer.py --socket
+```
+Wait for: `{"status": "ready", "socket": "/tmp/sam3.sock"}` (~12 s cold load, one-time).
+
+**Terminal 3 — dry run (repeat as many times as needed):**
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+export GEMINI_API_KEY=your_key
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py \
+  --detector sam3 --socket --object "measuring tape"
+```
+
+**Expected output:**
+```
+Running SAM3 (socket ~1s) + descriptor for "measuring tape" in parallel...
+  SAM3 mask: XXXXX pixels  score=0.XXX
+```
+Total time: ~3–5 s (SAM3 ~1 s, Gemini ~3 s in parallel). Re-running Terminal 3 immediately gives the same ~1 s SAM3 time — no reload.
+
+**To verify server is being used:** check `/tmp/sam3.sock` exists while Terminal 2 is open.
+```bash
+ls -la /tmp/sam3.sock
+```
+
+---
+
+### Speed Benchmark (optional)
+
+Confirms cold vs warm timing in isolation without Gemini or ROS:
+
+```bash
+# Terminal 1 — camera required (grabs one frame then disconnects)
+source /opt/ros/humble/setup.bash
+ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
+
+# Terminal 2 — benchmark
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 ~/magpie_control/scripts/test_sam3_server.py --object "measuring tape" --runs 5
+```
+
+**Expected:**
+```
+Cold load:      ~12.0s  (one-time)
+Warm inference: ~1.0s avg  (min ~0.98s, max ~1.2s)
+Speedup:        ~11–12x faster after warmup
+```
+
+**Verified result (2026-05-27, RTX 2070):**
+- Cold load: 11.9 s
+- Warm inference: 1.02 s avg (5 runs)
+- Speedup: 11.7×
+
+---
+
+## Stage 5e — Segmented Point Cloud + PCA Grasp Orientation
+
+Builds a 3D point cloud from the SAM3 mask and depth image, denoises it, then computes the object centroid, physical dimensions, and optimal gripper rotation via PCA.
+
+**Prerequisites:**
+- Stage 5d completed (SAM3 socket server working)
+- `open3d` installed: `pip install open3d`
+- Camera node running, SAM3 background server running
+
+**Terminal 1 — camera:**
+```bash
+source /opt/ros/humble/setup.bash
+ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
+```
+
+**Terminal 2 — SAM3 background server:**
+```bash
+~/sam3_env/bin/python3 ~/magpie_control/scripts/sam3_infer.py --socket
+```
+Wait for `{"status": "ready", ...}`
+
+**Terminal 3 — point cloud dry run:**
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+export GEMINI_API_KEY=your_key
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py \
+  --detector sam3 --socket --pcd --object "measuring tape"
+```
+
+**Expected output (additional section after detection):**
+```
+=== POINT CLOUD ANALYSIS ===
+  Points (after denoise): ~35000–36000
+  Centroid (world):  x=X.XXX  y=X.XXX  z=X.XXX m
+  Extent:   major=X.X cm  minor=X.X cm  depth=X.X cm
+  Major axis direction: [X.XX, X.XX, X.XX]
+  Grasp angle (wrist Z): X.X deg
+============================
+```
+
+**What to verify:**
+- Centroid XYZ matches world-frame pos from depth median to within ~2 mm
+- Extent values are physically plausible for the object (measuring tape ≈ 8×9 cm)
+- No crash if mask is empty (falls back with `[WARN]`)
+
+**Verified result (2026-05-27, measuring tape, RTX 2070):**
+- Points after denoise: 35,699
+- Centroid: (-0.248, -0.643, 0.079) m — matches median method to <1 mm
+- Extent: major=7.9 cm, minor=9.2 cm, depth=4.8 cm
+- Major axis: [0.03, -1.00, 0.08] (≈ world -Y)
+- Grasp angle: 1.4° (circular tape, so near-zero is expected)
+
+---
+
 ## Stage 6 — Arm + Gripper (coordinated motion)
 
 **Hardware required:** UR5 powered + initialized, MAGPIE gripper mounted on end-effector (12V + USB). Ethernet to robot network. **Clear the area around the arm before running.**

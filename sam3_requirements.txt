@@ -1,0 +1,41 @@
+# ============================================================
+# sam3_env — Python 3.12 isolated venv for SAM3
+# ============================================================
+# SAM3 requires Python 3.12+ and cannot coexist with ROS Python 3.10.
+# This file is for ~/sam3_env ONLY — do NOT pip install this into the system.
+#
+# One-time setup:
+#   python3.12 -m venv ~/sam3_env
+#   ~/sam3_env/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+#   cd /home/user/sam3 && ~/sam3_env/bin/pip install -e .
+#   ~/sam3_env/bin/pip install -r sam3_requirements.txt
+#
+# HuggingFace access (gated model — one-time):
+#   HF_HUB_OFFLINE=0 ~/sam3_env/bin/huggingface-cli login
+#   (paste token from huggingface.co/settings/tokens)
+#   Visit huggingface.co/facebook/sam3 and request access if not already granted.
+#
+# RTX 2070 (Turing / SM 7.5) note:
+#   SAM3 source has been globally patched: torch.bfloat16 → torch.float32
+#   (Turing does not support bfloat16; float32 is used throughout instead)
+#   Patch location: /home/user/sam3/sam3/**/*.py
+
+# --- PyTorch (install separately via index URL, see above) ---
+# torch>=2.7.0     — install with: pip install torch --index-url .../cu128
+# torchvision      — install with torch above
+
+# --- SAM3 core (install from source, see above) ---
+# sam3             — from /home/user/sam3 via pip install -e .
+
+# --- SAM3 runtime dependencies ---
+einops>=0.7.0                  # Tensor rearrangement (required by SAM3 attention blocks)
+pycocotools>=2.0               # COCO mask utilities (SAM3 evaluation helpers)
+psutil>=5.0                    # Process/system info
+scikit-image>=0.21             # Image processing utilities
+pandas>=2.0                    # Data handling (SAM3 training utilities)
+matplotlib>=3.7                # Plotting (SAM3 visualization utilities)
+"numpy<2.0"                    # SAM3 incompatible with numpy 2.x; pin to 1.x
+
+# --- Image I/O ---
+opencv-python-headless>=4.8.0  # Image read/write in sam3_infer.py (headless = no GUI deps)
+Pillow>=9.1.0                  # PIL Image.open() in sam3_infer.py

@@ -11,7 +11,14 @@ Pipeline per grasp:
   7. Retreat to approach height
 """
 
+import json as _json
+import os
+import subprocess
+import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+
 import numpy as np
 
 import rclpy
@@ -37,6 +44,12 @@ _TCP_TO_CAM = homog_xform(
     rotnMatx=R_krot([0.0, 0.0, 1.0], -np.pi / 2.0),
     posnVctr=[0.0, 0.0, 0.120],
 )
+
+# Distance from TCP (wrist flange) to fingertips along the tool Z axis.
+# The UR5 TCP is NOT configured to the fingertip — it is at the flange.
+# All grasp Z targets must add this offset so the fingertips land at the
+# intended height, not the wrist.
+GRIPPER_LENGTH = 0.231  # metres — wrist flange to fingertip (matches magpie_tooltip[2] in ur5.py)
 
 # DeliGrasp descriptor prompt — text-only, from deligrasp.github.io/assets/prompts/dg_descriptor.txt
 DG_DESCRIPTOR_PROMPT = """Control a robot gripper with force control and contact information. \
@@ -167,6 +180,8 @@ class DeliGraspNode(Node):
         self.depth_image = None   # latest depth frame (numpy HxW, mm uint16)
         self.camera_info = None   # sensor_msgs/CameraInfo
         self.tcp_matrix  = None   # latest TCP pose as 4x4 numpy array
+        self._sam3_proc      = None   # persistent SAM3 server subprocess (Python 3.12)
+        self._sam3_sock_path = None   # Unix socket path if background server is running
 
         # ── Subscriptions ───────────────────────────────────────────────────
         self.create_subscription(
@@ -187,6 +202,8 @@ class DeliGraspNode(Node):
             MoveLinear, '/arm/move_l', callback_group=self.cbg)
         self.cli_move_safe = self.create_client(
             Trigger, '/arm/move_safe', callback_group=self.cbg)
+        self.cli_stop      = self.create_client(
+            Trigger, '/arm/stop', callback_group=self.cbg)
         self.cli_open      = self.create_client(
             Trigger, '/gripper/open', callback_group=self.cbg)
 
@@ -248,6 +265,7 @@ class DeliGraspNode(Node):
             try:
                 from magpie_perception.label_dino import LabelDINO
                 self.detector = LabelDINO()
+                self.detector.init()
                 self.get_logger().info('Grounding DINO loaded')
             except ImportError:
                 self.get_logger().warning('magpie_perception not installed — detector unavailable')
@@ -258,8 +276,38 @@ class DeliGraspNode(Node):
                 self.get_logger().info('OWL-ViT loaded')
             except ImportError:
                 self.get_logger().warning('magpie_perception not installed — detector unavailable')
+        elif detector_type == 'gemini':
+            self.get_logger().info('Gemini VLM detector selected — will use cloud vision API')
+        elif detector_type == 'sam3':
+            _sock = '/tmp/sam3.sock'
+            if os.path.exists(_sock):
+                self._sam3_sock_path = _sock
+                self.get_logger().info(f'SAM3 detector: found background server at {_sock} (warm ~1s)')
+            else:
+                self.get_logger().info('SAM3 detector: no background server found — starting inline (~12s cold load)')
+                self._start_sam3_server()
         else:
-            self.get_logger().warning(f'Unknown detector_type "{detector_type}" — use grounding_dino or owlvit')
+            self.get_logger().warning(f'Unknown detector_type "{detector_type}" — use grounding_dino, owlvit, gemini, or sam3')
+
+    def _start_sam3_server(self):
+        """Launch sam3_infer.py --server and block until it prints {"status": "ready"}."""
+        sam3_python = os.path.expanduser('~/sam3_env/bin/python3')
+        sam3_script = os.path.expanduser('~/magpie_control/scripts/sam3_infer.py')
+        self._sam3_proc = subprocess.Popen(
+            [sam3_python, sam3_script, '--server'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=open('/tmp/sam3_server.log', 'w'),  # avoid stderr pipe deadlock
+            text=True, bufsize=1,
+        )
+        ready_line = self._sam3_proc.stdout.readline()
+        try:
+            msg = _json.loads(ready_line)
+            if msg.get('status') == 'ready':
+                self.get_logger().info('SAM3 server ready (model loaded)')
+            else:
+                self.get_logger().warning(f'Unexpected SAM3 startup message: {ready_line.strip()}')
+        except Exception as e:
+            self.get_logger().warning(f'SAM3 server startup parse error: {e}')
 
     def _resolve_query(self):
         """Return the object query string, optionally via LLM."""
@@ -391,11 +439,162 @@ class DeliGraspNode(Node):
         }
 
     def _detect(self, query, confidence):
-        """Run detector. Returns (boxes, labels, scores) or raises."""
-        if self.detector is None:
-            raise RuntimeError('No detector loaded — check detector_type parameter')
-        boxes, labels, scores = self.detector.label(self.color_image, query, confidence)
-        return boxes, labels, scores
+        """Run detector. Returns (boxes, labels, scores, mask) — mask is H×W bool or None."""
+        detector_type = self.get_parameter('detector_type').value
+        if detector_type == 'gemini':
+            return self._detect_gemini(query)
+        if detector_type == 'sam3':
+            return self._detect_sam3(query, confidence)
+        # grounding_dino (default)
+        import torch
+        from PIL import Image as PILImage
+        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        processor = AutoProcessor.from_pretrained('IDEA-Research/grounding-dino-tiny')
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            'IDEA-Research/grounding-dino-tiny').to(device)
+        pil_img = PILImage.fromarray(self.color_image)
+        inputs = processor(images=pil_img, text=query + '.', return_tensors='pt').to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        h, w = self.color_image.shape[:2]
+        results = processor.post_process_grounded_object_detection(
+            outputs, input_ids=inputs.input_ids,
+            threshold=confidence, text_threshold=confidence,
+            target_sizes=[(h, w)],
+        )
+        r = results[0]
+        boxes  = r['boxes'].cpu().numpy()
+        scores = r['scores'].cpu().numpy()
+        labels = np.array(r['labels'])
+        return boxes, labels, scores, None
+
+    def _detect_sam3(self, query, confidence):
+        """SAM3 detection — uses background socket server if running, else inline server.
+        Falls back to DINO on any error."""
+        import base64, cv2
+
+        tmp_path = tempfile.mktemp(suffix='.jpg')
+        cv2.imwrite(tmp_path, cv2.cvtColor(self.color_image, cv2.COLOR_RGB2BGR))
+
+        try:
+            if self._sam3_sock_path and os.path.exists(self._sam3_sock_path):
+                # Background socket server path
+                import socket as _socket
+                with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+                    s.connect(self._sam3_sock_path)
+                    s.sendall((_json.dumps({'image': tmp_path, 'query': query}) + '\n').encode())
+                    response = b''
+                    while True:
+                        chunk = s.recv(65536)
+                        if not chunk:
+                            break
+                        response += chunk
+                data = _json.loads(response.decode().strip())
+            else:
+                # Inline stdin server path
+                if self._sam3_proc is None or self._sam3_proc.poll() is not None:
+                    self.get_logger().warning('SAM3 server not running — restarting')
+                    self._start_sam3_server()
+                req = _json.dumps({'image': tmp_path, 'query': query})
+                self._sam3_proc.stdin.write(req + '\n')
+                self._sam3_proc.stdin.flush()
+                data = _json.loads(self._sam3_proc.stdout.readline())
+
+            if 'error' in data:
+                raise RuntimeError(data['error'])
+
+            boxes  = np.array(data['boxes'],  dtype=float)
+            scores = np.array(data['scores'], dtype=float)
+            labels = np.array([query] * len(scores))
+
+            mask = None
+            if data.get('mask_b64') and len(boxes) > 0:
+                raw  = base64.b64decode(data['mask_b64'])
+                h, w = data['mask_shape']
+                mask = np.frombuffer(raw, dtype=np.uint8).reshape(h, w).astype(bool)
+                self.get_logger().info(
+                    f'SAM3 mask: {mask.sum()} pixels  score={scores[int(np.argmax(scores))]:.3f}')
+
+            return boxes, labels, scores, mask
+
+        except Exception as e:
+            self.get_logger().warning(f'SAM3 failed: {e} — falling back to DINO')
+            return self._detect_grounding_dino(query, confidence)
+        finally:
+            os.unlink(tmp_path)
+
+    def _detect_grounding_dino(self, query, confidence):
+        """Isolated DINO path, callable from _detect_sam3."""
+        import torch
+        from PIL import Image as PILImage
+        from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        processor = AutoProcessor.from_pretrained('IDEA-Research/grounding-dino-tiny')
+        model = AutoModelForZeroShotObjectDetection.from_pretrained(
+            'IDEA-Research/grounding-dino-tiny').to(device)
+        pil_img = PILImage.fromarray(self.color_image)
+        inputs = processor(images=pil_img, text=query + '.', return_tensors='pt').to(device)
+        with torch.no_grad():
+            outputs = model(**inputs)
+        h, w = self.color_image.shape[:2]
+        results = processor.post_process_grounded_object_detection(
+            outputs, input_ids=inputs.input_ids,
+            threshold=confidence, text_threshold=confidence,
+            target_sizes=[(h, w)],
+        )
+        r = results[0]
+        boxes  = r['boxes'].cpu().numpy()
+        scores = r['scores'].cpu().numpy()
+        labels = np.array(r['labels'])
+        return boxes, labels, scores, None
+
+    def _detect_gemini(self, query):
+        """Use Gemini Vision API to detect object. Returns (boxes, labels, scores)."""
+        import os, re, cv2
+        from google import genai
+        from google.genai import types as gtypes
+
+        api_key = os.environ.get('GEMINI_API_KEY', '')
+        if not api_key:
+            raise RuntimeError('GEMINI_API_KEY not set — required for gemini detector')
+
+        h, w = self.color_image.shape[:2]
+        _, buf = cv2.imencode('.jpg', cv2.cvtColor(self.color_image, cv2.COLOR_RGB2BGR))
+
+        prompt = (
+            f'Find the {query} in this image. '
+            'Return ONLY the bounding box as [y_min, x_min, y_max, x_max] '
+            'where each value is an integer 0-1000 scaled to image dimensions. '
+            'If not visible, return: not found'
+        )
+
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=[
+                gtypes.Part.from_bytes(data=buf.tobytes(), mime_type='image/jpeg'),
+                prompt,
+            ],
+        )
+        text = response.text.strip()
+        self.get_logger().info(f'Gemini VLM: {text}')
+
+        m = re.search(r'\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)\]', text)
+        if not m or 'not found' in text.lower():
+            return np.zeros((0, 4)), np.array([]), np.array([]), None
+
+        y1, x1, y2, x2 = [int(m.group(i)) for i in range(1, 5)]
+        # Gemini returns 0-1000 normalized; convert to pixels
+        x1p = int(x1 * w / 1000)
+        y1p = int(y1 * h / 1000)
+        x2p = int(x2 * w / 1000)
+        y2p = int(y2 * h / 1000)
+
+        boxes  = np.array([[x1p, y1p, x2p, y2p]], dtype=float)
+        scores = np.array([0.9])   # Gemini doesn't emit confidence scores
+        labels = np.array([query])
+        return boxes, labels, scores, None
 
     # ── Geometry helpers ───────────────────────────────────────────────────────
 
@@ -465,26 +664,44 @@ class DeliGraspNode(Node):
         approach_h = self.get_parameter('approach_height').value
         grasp_off  = self.get_parameter('grasp_z_offset').value
 
-        # ── 1. Detect ──────────────────────────────────────────────────────
-        self.get_logger().info(f'Detecting: "{query}"')
-        boxes, labels, scores = self._detect(query, confidence)
+        # ── 1. Detect + Gemini descriptor in parallel ──────────────────────
+        # Gemini descriptor only needs the object name (not the image or depth),
+        # so it can run concurrently with detection.
+        use_gemini = self.get_parameter('use_gemini').value
+        self.get_logger().info(f'Detecting "{query}" (+ Gemini descriptor in parallel)')
+        _pool = ThreadPoolExecutor(max_workers=2)
+        det_fut  = _pool.submit(self._detect, query, confidence)
+        desc_fut = _pool.submit(self._estimate_params_from_descriptor, query) if use_gemini else None
+        _pool.shutdown(wait=False)  # futures run freely; we .result() below
+
+        boxes, labels, scores, seg_mask = det_fut.result()
         if len(boxes) == 0:
+            if desc_fut:
+                desc_fut.cancel()
             raise RuntimeError(f'No "{query}" detected in current view')
 
         best = int(np.argmax(scores))
         x1, y1, x2, y2 = boxes[best]
-        u = int((x1 + x2) / 2)
-        v = int((y1 + y2) / 2)
         self.get_logger().info(
             f'Detected "{labels[best]}" (conf={scores[best]:.2f}) bbox=[{x1},{y1},{x2},{y2}]')
 
         # ── 2. 3D localisation ─────────────────────────────────────────────
-        pad = 5
-        roi = self.depth_image[
-            max(0, v - pad):v + pad,
-            max(0, u - pad):u + pad,
-        ].astype(float)
-        valid = roi[roi > 0]
+        if seg_mask is not None and seg_mask.any():
+            # SAM3: depth from all masked object pixels, centroid from mask
+            valid = self.depth_image[seg_mask].astype(float)
+            valid = valid[valid > 0]
+            ys, xs = np.where(seg_mask)
+            u, v = int(xs.mean()), int(ys.mean())
+            self.get_logger().info(f'SAM3 mask depth: {len(valid)} pixels, centroid=({u},{v})')
+        else:
+            u = int((x1 + x2) / 2)
+            v = int((y1 + y2) / 2)
+            pad = 5
+            roi = self.depth_image[
+                max(0, v - pad):v + pad,
+                max(0, u - pad):u + pad,
+            ].astype(float)
+            valid = roi[roi > 0]
         if len(valid) == 0:
             raise RuntimeError('Depth image has no valid pixels at detection centroid')
         depth_m = float(np.median(valid)) / 1000.0   # mm → m
@@ -500,18 +717,24 @@ class DeliGraspNode(Node):
         time.sleep(0.3)
 
         # ── 4. Move to approach pose ───────────────────────────────────────
-        # Keep current TCP orientation, translate XY to object, Z to approach height
+        # TCP must be GRIPPER_LENGTH above the fingertip target.
+        # Approach: fingertips approach_h above block top surface.
+        # TCP z = block_z + approach_h + GRIPPER_LENGTH
         approach = np.array(self.tcp_matrix)
         approach[0, 3] = p_world[0]
         approach[1, 3] = p_world[1]
-        approach[2, 3] = p_world[2] + approach_h
+        approach[2, 3] = p_world[2] + approach_h + GRIPPER_LENGTH
 
-        self.get_logger().info('Moving to approach pose')
+        self.get_logger().info(
+            f'Approach TCP z={approach[2,3]:.3f} m  '
+            f'(fingertips at z={p_world[2]+approach_h:.3f} m)')
         self._move_l(approach, speed=0.15, accel=0.3)
 
         # ── 5. Descend to grasp pose ───────────────────────────────────────
+        # Grasp: fingertips graze_off below block top surface for a mid-block grip.
+        # TCP z = block_z - grasp_off + GRIPPER_LENGTH
         grasp = approach.copy()
-        grasp[2, 3] = p_world[2] + grasp_off
+        grasp[2, 3] = p_world[2] - grasp_off + GRIPPER_LENGTH
 
         self.get_logger().info('Descending to grasp pose')
         self._move_l(grasp, speed=0.05, accel=0.1)
@@ -522,24 +745,24 @@ class DeliGraspNode(Node):
         params.goal_aperture    = 30.0
         params.complete_grasp   = True
 
-        if self.get_parameter('use_gemini').value:
+        if use_gemini and desc_fut is not None:
             try:
-                gp = self._estimate_params_from_descriptor(query)
+                gp = desc_fut.result(timeout=30.0)  # likely already done
                 if gp is None:
                     raise RuntimeError('Descriptor parsing returned None')
-                params.initial_force    = float(gp['initial_force'])
-                params.additional_force = float(gp['additional_force'])
+                params.initial_force      = float(gp['initial_force'])
+                params.additional_force   = float(gp['additional_force'])
                 params.additional_closure = float(gp['additional_closure'])
-                params.goal_aperture    = float(gp['goal_aperture_mm'])
+                params.goal_aperture      = float(gp['goal_aperture_mm'])
             except Exception as e:
                 self.get_logger().error(
                     f'Gemini descriptor failed: {e} — using config defaults')
-                params.initial_force    = float(self.get_parameter('initial_force').value)
-                params.additional_force = float(self.get_parameter('additional_force').value)
+                params.initial_force      = float(self.get_parameter('initial_force').value)
+                params.additional_force   = float(self.get_parameter('additional_force').value)
                 params.additional_closure = float(self.get_parameter('additional_closure').value)
         else:
-            params.initial_force    = float(self.get_parameter('initial_force').value)
-            params.additional_force = float(self.get_parameter('additional_force').value)
+            params.initial_force      = float(self.get_parameter('initial_force').value)
+            params.additional_force   = float(self.get_parameter('additional_force').value)
             params.additional_closure = float(self.get_parameter('additional_closure').value)
 
         if not self.ac_deligrasp.wait_for_server(timeout_sec=3.0):
@@ -565,20 +788,28 @@ class DeliGraspNode(Node):
         # ── 7. Retreat ────────────────────────────────────────────────────
         self.get_logger().info('Retreating')
         retreat = grasp.copy()
-        retreat[2, 3] += approach_h
+        retreat[2, 3] = p_world[2] + approach_h + GRIPPER_LENGTH
         self._move_l(retreat, speed=0.10, accel=0.2)
 
     def _safe_abort(self):
-        """Best-effort safety recovery: open gripper and go to safe pose."""
-        for client, req in [(self.cli_open, Trigger.Request()),
-                            (self.cli_move_safe, Trigger.Request())]:
-            try:
-                self._call(client, req, timeout=5.0)
-            except Exception:
-                pass
+        """Best-effort safety recovery: open gripper and stop arm in place.
+        Does NOT call move_safe — joint-space moves to Q_safe can cause
+        unexpected large rotations if the arm is far from that configuration.
+        """
+        try:
+            self._call(self.cli_open, Trigger.Request(), timeout=5.0)
+        except Exception:
+            pass
+        try:
+            self._call(self.cli_stop, Trigger.Request(), timeout=3.0)
+        except Exception:
+            pass
 
     def destroy_node(self):
         self.get_logger().info('Shutting down DeliGrasp Node')
+        if self._sam3_proc and self._sam3_proc.poll() is None:
+            self._sam3_proc.stdin.close()
+            self._sam3_proc.terminate()
         super().destroy_node()
 
 
@@ -591,6 +822,8 @@ def main(args=None):
         executor.spin()
     except KeyboardInterrupt:
         pass
+    except Exception as e:
+        node.get_logger().error(f'Executor error: {e}')
     finally:
         node.destroy_node()
         rclpy.shutdown()

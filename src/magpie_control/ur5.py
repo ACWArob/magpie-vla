@@ -91,7 +91,7 @@ class UR5_Interface:
         self.recv       = None # -- `RTDEReceiveInterface` object
         self.gripper    = None # -- Gripper Controller Interface
         self.ft_sensor = None
-        self.Q_safe     = [ radians( elem ) for elem in [ 34.65, -105.31, 101.03, 1.90, 38.37, 188.78 ] ]
+        self.Q_safe     = [ radians( elem ) for elem in [ 60.83, -59.1, 61.07, 269.23, -89.73, 152.88 ] ]
         self.torqLim    = 600
         self.freq       = freq
         self.record     = record
@@ -287,7 +287,9 @@ class UR5_Interface:
     def start( self ):
         """ Connect to RTDE and the gripper """
         # try:
-        self.ctrl = rtde_control.RTDEControlInterface( self.robotIP )
+        _flags = (rtde_control.RTDEControlInterface.FLAG_UPLOAD_SCRIPT |
+                  rtde_control.RTDEControlInterface.FLAG_UPPER_RANGE_REGISTERS)
+        self.ctrl = rtde_control.RTDEControlInterface( self.robotIP, flags=_flags )
         self.recv = rtde_receive.RTDEReceiveInterface( self.robotIP, self.freq )
         self.home = self.getPose()
         if self.provide_gripper: 

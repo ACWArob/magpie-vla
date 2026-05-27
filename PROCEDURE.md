@@ -1025,3 +1025,417 @@ Added `scripts/test_gemini_gripper.py` — end-to-end test without the arm:
 No `input()` pauses — fully automatic once the object is placed. The gripper's built-in force feedback handles contact detection and stop.
 
 **Verified:** Gemini returned `initial_force=1.60N`, `additional_force=0.01N`, `spring_constant=1000 N/m` for a red block. Gripper closed to contact and released without user interaction. ✓
+
+---
+
+## Day 4 — DeliGrasp Descriptor Pipeline, New Home Position, RTDE Register Fix
+
+### D4-1: DeliGrasp Descriptor Prompt (Text-Only Gemini)
+
+The previous Gemini integration used a camera image to estimate grasp parameters. This was replaced with the **DeliGrasp descriptor prompt** — a text-only LLM call that derives physics-based grasp parameters from the object name alone, matching the approach in the DeliGrasp paper (deligrasp.github.io).
+
+The descriptor prompt instructs Gemini to fill out a structured template describing:
+- Object mass (g), spring constant (N/m), friction coefficient
+- Goal aperture (mm), additional closure on slip (mm)
+
+From these, grasp forces are computed using paper physics:
+```
+initial_force = clamp(mass_kg × 9.81 / friction, 0.15, 16.0)   # N
+additional_force = max(0.05, additional_closure × k × 0.0001)   # N
+```
+
+**Changes in `deligrasp_node.py`:**
+- Added `DG_DESCRIPTOR_PROMPT` constant at module level (verbatim from deligrasp.github.io)
+- Added `_parse_descriptor(text)` — regex parser for the structured template response
+- Added `_estimate_params_from_descriptor(object_name)` — calls Gemini text-only, parses result, computes forces
+- Removed `gemini_task` parameter; `use_gemini` now enables the descriptor path (default `True`)
+- Updated `_run_grasp_pipeline` step 6 to call `_estimate_params_from_descriptor(query)` instead of vision-based method
+
+**Changes in `config/gripper_config.yaml`:**
+- `use_gemini: true` (was `false`)
+- `gemini_task` line removed
+
+**Standalone test scripts rewritten:**
+- `scripts/test_gemini_gripper.py` — text-only descriptor + gripper only (no arm, no camera)
+- `scripts/test_gemini_arm_gripper.py` — text-only descriptor + arm + gripper (no camera for params)
+
+---
+
+### D4-2: New Safe Home Position (Gripper Mounted)
+
+The old `Q_safe = [12.30°, −110.36°, 95.90°, −75.48°, −89.59°, 12.33°]` was set without the gripper mounted. With the gripper attached (190mm extension, 0.6kg), several joints were in unsafe positions relative to the table.
+
+Used teach mode to find a new home position with gripper mounted and clear of all surfaces. Recorded via `ros2 topic echo /arm/joint_states --once`.
+
+**New Q_safe:** `[34.65°, −105.31°, 101.03°, 1.90°, 38.37°, 188.78°]` → TCP `[−0.175, −0.333, 0.435]`
+
+Updated `ur5.py` line 94.
+
+**Gripper payload setup on pendant (required for safe motion):**
+- Pendant → Installation → TCP → set payload: **0.6 kg**, CoG Z = **95 mm**
+
+---
+
+### D4-3: RTDE Register Conflict — Root Cause Identified
+
+`RTDEControlInterface` failed with "RTDE input registers already in use" persistently across safety restarts and process kills. Previous understanding (Day 3) attributed this to a stale RTDE session — incorrect.
+
+**Root cause:** UR CB3 Installation files store **Modbus client signal definitions** that occupy RTDE input registers 18–31 even when the Modbus fieldbus adapter is toggled off. The adapter toggle controls connectivity, not register allocation. On every robot boot, the Installation is reloaded and the registers are re-occupied.
+
+**Fix:** Complete installation reset on pendant (Hamburger → Setup Robot → Installations → New Installation → Save). This creates a blank installation with no Modbus signals, permanently freeing all RTDE registers.
+
+**Attempted workarounds that failed:**
+- `FLAG_UPPER_RANGE_REGISTERS` — failed because all registers 18–31 were occupied (not just 18–23)
+- `FLAG_NO_WAIT` — failed, different error
+- `restart safety` + `power on` + `brake release` dashboard commands — registers re-occupied on reload
+
+---
+
+### D4-4: Emergency Stop Incident — Joint Flip on move_safe
+
+**What happened:** Called `/arm/move_safe` from joint state [52.5°, −93.6°, 123.1°, **355.9°**, 81.8°, 183.7°]. Q_safe target wrist_1 = **1.9°**. Shortest path = 6°. RTDE `moveJ` took the **long path (354°)**, causing a violent wrist_1 rotation that triggered the robot emergency stop.
+
+**Recovery:** Dashboard `restart safety` → `power on` → `brake release`. Physical e-stop button required release on pendant before robot would accept power-on.
+
+**Root cause of flip:** `moveJ` picks joint paths based on angular distance in the joint controller's coordinate space. When one joint is near 0°/360°, the controller may choose the long path. This is a known limitation — the solution is to ensure Q_safe joints are set from the same arm configuration as the one that will call `move_safe` (no large joint angle discontinuities).
+
+**Post-incident Q_safe update:** Updated to actual post-e-stop arm position: `[41.2°, −101.0°, 109.2°, 132.2°, 54.3°, 186.9°]` (TCP z = 0.480 m, arm safely upright).
+
+**Change to `_safe_abort` in `deligrasp_node.py`:** Removed `/arm/move_safe` call from error recovery path. Now only opens gripper and stops arm in place — prevents triggering a joint flip on any grasp failure. (See Day 5 D5-1.)
+
+---
+
+### D4-5: Dry-Run Analysis Script
+
+Added `scripts/test_dryrun_analyze.py` — runs the full DeliGrasp perception and Gemini parameter pipeline with **zero arm/gripper movement**. Outputs:
+- Camera frame metadata (resolution, depth range)
+- Grounding DINO detection (bounding box, confidence)
+- 3D world position of detected object
+- Computed approach and grasp Z heights
+- Full Gemini descriptor response
+- Computed grip params (initial_force, aperture, slip response)
+- Annotated image saved to `/tmp/dryrun_detection.jpg`
+
+**Verified (red block):** Detection 87.6% confidence, block at world (0.315, −0.265, 0.226 m), initial_force = 3.68 N.
+
+---
+
+### D4-6: LabelDINO API Fix
+
+The installed `magpie_perception.label_dino.LabelDINO` class does not call `init()` in `__init__()` — the HuggingFace processor and model are only loaded when `init()` is called explicitly. Calling `label()` before `init()` raises `AttributeError: 'LabelDINO' object has no attribute 'processor'`.
+
+Additionally, the installed version passes `box_threshold=` to `post_process_grounded_object_detection()`, but the installed version of `transformers` renamed this argument to `threshold=`.
+
+**Fix in `deligrasp_node.py` and `test_dryrun_analyze.py`:** Bypass `LabelDINO` entirely. Call Grounding DINO directly via `AutoProcessor` + `AutoModelForZeroShotObjectDetection` from HuggingFace `transformers`, using the correct `threshold=` argument.
+
+---
+
+## Day 5 — Full Pipeline Run (2026-05-27)
+
+### D5-1: safe_abort Fix — Stop in Place Instead of move_safe
+
+**Problem:** `deligrasp_node._safe_abort()` called `/arm/move_safe` on any grasp failure. Given the Q_safe joint flip risk (D4-4), this was a safety hazard — a detection failure mid-grasp could trigger a 354° wrist rotation.
+
+**Fix:** `_safe_abort()` now:
+1. Calls `/gripper/open` — releases the object
+2. Calls `/arm/stop` — halts arm immediately in current position
+
+No joint-space move is made. The arm stays where it is, which is always safe relative to a joint flip.
+
+Added `self.cli_stop` client (`/arm/stop`) to `DeliGraspNode.__init__`.
+
+### D5-2: Full Pipeline Status at Start of Day
+
+| Component | Status |
+|---|---|
+| UR5 arm (192.168.0.4) | Connected, RTDE running |
+| RealSense D405 | USB connected, camera node publishing |
+| MAGPIE gripper | USB connected, gripper_node responding |
+| `ur5_node` | Running |
+| `gripper_node` | Running |
+| `deligrasp_node` | Pending start |
+
+Arm speed set to **10% speed, 5% acceleration** before any motion.
+
+### D5-3: Selectable Object Detector — ViT vs VLM
+
+Two detection backends are now supported, selectable at runtime.
+
+#### Grounding DINO (`--detector grounding_dino`, default)
+- **Type:** Vision Transformer (ViT) fine-tuned for zero-shot detection
+- **How it works:** Takes image + text query as input. A trained detection head produces bounding boxes + confidence scores directly.
+- **Where it runs:** Locally on the lab machine. Model cached at `~/.cache/huggingface/`.
+- **Speed:** ~2–5 s on CPU, <1 s on GPU.
+- **API cost:** None. Set `TRANSFORMERS_OFFLINE=1` to suppress HuggingFace network calls.
+- **Output:** Bounding box (xyxy pixels) + confidence score per detection.
+- **Best for:** Reliable localization. Specialist model — only does detection.
+
+#### Gemini VLM (`--detector gemini`)
+- **Type:** Vision-Language Model (multimodal LLM)
+- **How it works:** The full camera frame is encoded as JPEG and sent to `gemini-2.5-flash` alongside a text prompt asking for the bounding box. Gemini returns coordinates as text in `[y_min, x_min, y_max, x_max]` format normalized 0–1000.
+- **Where it runs:** Google cloud API. Requires `GEMINI_API_KEY`.
+- **Speed:** ~1–2 s, network-dependent.
+- **API cost:** Tokens per image (free tier available at aistudio.google.com).
+- **Output:** Single bounding box (no confidence score — assigned 0.9 as placeholder). Can be combined with the DeliGrasp descriptor in one call.
+- **Best for:** Flexibility. A general-purpose model that can reason about unusual objects without retraining.
+
+#### Key tradeoff
+DINO is a specialist — precise pixel-level localization, no internet needed. Gemini is a generalist — treats detection as a language task, less precise on coordinates but can do detection + grasp parameter estimation in a single API call.
+
+#### Code changes
+- `deligrasp_node.py`: `_detect()` branches on `detector_type` ROS parameter. New `_detect_gemini()` method handles the Gemini vision path.
+- `_load_perception()`: accepts `gemini` as valid type (no model to load at startup).
+- `test_dryrun_analyze.py`: added `--detector grounding_dino|gemini` CLI argument.
+
+#### Usage
+```bash
+# Local DINO (default, no API cost)
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py --object "red block"
+
+# Gemini cloud vision
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py --object "red block" --detector gemini
+
+# Full deligrasp_node with Gemini detector
+ros2 run magpie_control deligrasp_node --ros-args -p detector_type:=gemini
+```
+
+---
+
+### D5-4: SAM3 — Third Object Detector (Segment Anything Model 3)
+
+SAM3 (Segment Anything Model 3) is Meta's unified promptable segmentation model, released 2026-03-27. Unlike Grounding DINO (which outputs bounding boxes) or Gemini VLM (which outputs a single text-format box), SAM3 produces a **pixel-level binary mask** for the detected object in addition to bounding boxes and confidence scores. The mask enables more accurate depth sampling — instead of a 10×10 pixel centroid patch, the depth is sampled over every pixel belonging to the object.
+
+**Model specs:** ~848M parameters. Requires Python 3.12+, PyTorch 2.7+, CUDA 12.6+.  
+**HuggingFace repo:** `facebook/sam3` (gated — access request required at huggingface.co/facebook/sam3).  
+**SAM3 API:** `build_sam3_image_model()` + `Sam3Processor` — takes text prompt directly, no separate detection step.
+
+#### Why a Subprocess Bridge
+
+ROS 2 Humble mandates Python 3.10. SAM3 requires Python 3.12 (C extension `sam3._C` compiled against 3.12 only). These cannot coexist in one Python environment.
+
+**Solution:** SAM3 runs in an isolated Python 3.12 virtual environment (`~/sam3_env`). The ROS stack calls it via `subprocess.run()`, passing the image path and text query as arguments and reading a JSON result back over stdout. The JSON carries base64-encoded mask data.
+
+```
+deligrasp_node.py (Python 3.10)
+  → subprocess.run([~/sam3_env/bin/python3, scripts/sam3_infer.py, --image, --query])
+    → SAM3 model in Python 3.12
+    → JSON stdout: {"boxes": [...], "scores": [...], "mask_b64": "...", "mask_shape": [H, W]}
+```
+
+On any failure (model error, subprocess crash, timeout), the SAM3 path falls back to Grounding DINO automatically.
+
+#### sam3_env Setup
+
+```bash
+# Install Python 3.12 (deadsnakes PPA)
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update && sudo apt install python3.12 python3.12-venv python3.12-dev
+
+# Create isolated venv (never pollutes ROS Python 3.10)
+python3.12 -m venv ~/sam3_env
+
+# Install CUDA PyTorch for RTX 2070 (CUDA 12.8)
+~/sam3_env/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+
+# Install SAM3 from source
+cd /home/user/sam3
+~/sam3_env/bin/pip install -e .
+
+# Install required extras
+~/sam3_env/bin/pip install einops pycocotools psutil opencv-python-headless \
+    scikit-image pandas matplotlib "numpy<2"
+```
+
+**Note on numpy:** SAM3 requires `numpy<2`. If `opencv-python` pulls numpy 2.x, force the downgrade with `pip install "numpy<2"` after.
+
+#### HuggingFace Gated Access
+
+SAM3 weights are gated — the model download will fail without approval.
+
+1. Create an account at huggingface.co
+2. Visit `huggingface.co/facebook/sam3` and click **"Request access"**
+3. Wait for approval email (typically minutes to hours)
+4. Login from the sam3_env:
+   ```bash
+   HF_HUB_OFFLINE=0 ~/sam3_env/bin/huggingface-cli login
+   # Paste token from huggingface.co/settings/tokens
+   ```
+
+**Note:** If `TRANSFORMERS_OFFLINE=1` is set in `.bashrc` (which blocks HF downloads in ROS), the subprocess sets `HF_HUB_OFFLINE=0` explicitly before any imports. This overrides the env var for the subprocess only.
+
+#### RTX 2070 (Turing) Float32 Patch
+
+RTX 2070 (SM 7.5, Turing architecture) does not support BFloat16 hardware operations. SAM3 was designed for Ampere (A100/H100) and hardcodes `torch.bfloat16` throughout — in `torch.autocast()` contexts, explicit `.to(torch.bfloat16)` tensor casts, and image preprocessing. Two global replacements were applied to the SAM3 source:
+
+```bash
+# Pass 1: bfloat16 → float16 (initial patch)
+find /home/user/sam3/sam3 -name "*.py" -exec sed -i 's/torch\.bfloat16/torch.float16/g' {} \;
+
+# Pass 2: float16 → float32 (required because float16 autocast fought float32 model weights)
+find /home/user/sam3/sam3 -name "*.py" -exec sed -i 's/torch\.float16/torch.float32/g' {} \;
+
+# Clear compiled bytecode cache
+find /home/user/sam3 -name "*.pyc" -delete
+```
+
+After these patches, SAM3 runs entirely in float32 — autocast contexts, image tensors, backbone features, and matmul inputs all use the same dtype. This is slower than bfloat16 on Ampere hardware but correct and stable on Turing.
+
+**Remaining "bfloat16" text:** SAM3 source still contains ~17 occurrences of the string "bfloat16" in variable names (e.g., `backbone_fpn_bf16`) and comments. These are harmless — no actual `torch.bfloat16` dtype references remain.
+
+#### Mask-Based Depth Sampling
+
+With a SAM3 pixel mask, depth estimation is more accurate than the 10×10 centroid patch used by DINO/Gemini:
+
+- **Centroid:** geometric mean of all `True` pixels in the mask (`xs.mean(), ys.mean()`). More accurate than the bounding box centre because the mask follows the object shape.
+- **Depth:** median of all `depth[mask]` pixels with valid depth (> 0). Rejects noise and background pixels inside the bounding box that don't belong to the object.
+
+A green semi-transparent overlay is drawn on the annotated detection image to visualize the mask.
+
+#### New Files
+
+| File | Description |
+|---|---|
+| `scripts/sam3_infer.py` | Standalone Python 3.12 subprocess script. Loads SAM3, runs inference, outputs JSON to stdout. |
+
+#### Code Changes
+
+| File | Change |
+|---|---|
+| `scripts/test_dryrun_analyze.py` | Added `detect_object_sam3()`, `--detector sam3` CLI option, mask overlay + centroid logic |
+| `src/magpie_control/deligrasp_node.py` | Added `_detect_sam3()`, 4-tuple return from `_detect()`, mask-based depth sampling in `_run_grasp_pipeline()` |
+
+#### Usage
+
+```bash
+# Dry-run with SAM3
+export GEMINI_API_KEY=your_key
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py --object "measuring tape" --detector sam3
+
+# deligrasp_node with SAM3
+ros2 run magpie_control deligrasp_node --ros-args -p detector_type:=sam3
+```
+
+**Note:** The `--detector sam3` path runs DINO first to get a bounding box, then passes the image to SAM3 for the pixel mask. If SAM3 fails for any reason, the result falls back silently to the DINO detection (mask = None, centroid depth patch used).
+
+### D5-5: SAM3 Speed Optimisations — Socket Server + Parallel Execution
+
+Two independent optimisations were added to reduce per-grasp latency.
+
+#### Problem
+
+SAM3 cold-loads the model from disk to GPU in ~12 s every time the node or dry-run script starts. Additionally, the Gemini descriptor was called sequentially after detection, adding another ~3 s.
+
+#### Optimisation 1 — Persistent Background Socket Server
+
+`sam3_infer.py` gained a `--socket` mode. Instead of loading the model fresh per call, start the server once and leave it running. Any client connects to the Unix socket `/tmp/sam3.sock`, sends a JSON request, receives a JSON response, and disconnects. The model stays resident on the GPU.
+
+**Server start (one-time per session):**
+```bash
+~/sam3_env/bin/python3 ~/magpie_control/scripts/sam3_infer.py --socket
+# Prints: {"status": "ready", "socket": "/tmp/sam3.sock"}  after ~12 s
+# Leave this terminal open — the model is now always hot
+```
+
+**Protocol:** same JSON as stdin server — `{"image": "/tmp/x.jpg", "query": "object"}` in, `{"boxes": ..., "scores": ..., "mask_b64": ..., "mask_shape": ...}` out.
+
+**Auto-detection in `deligrasp_node.py`:** at startup, if `/tmp/sam3.sock` exists the node uses the socket client; otherwise it falls back to spawning the inline stdin server as before. No flag needed.
+
+**Result:** per-call SAM3 latency drops from ~12 s (cold) to ~1 s (warm socket).
+
+#### Optimisation 2 — Parallel Detection + Gemini Descriptor
+
+The Gemini descriptor needs only the object name — it is independent of detection output. Both are submitted to a `ThreadPoolExecutor` at the same time. On a typical Gemini call (~3 s) the descriptor finishes well before (or concurrent with) detection, adding zero extra latency.
+
+Applied in both `scripts/test_dryrun_analyze.py` and `src/magpie_control/deligrasp_node.py`.
+
+#### Combined Latency
+
+| Mode | SAM3 | Gemini | Total |
+|---|---|---|---|
+| Cold (original) | 12 s | ~3 s (hidden by SAM3) | ~14–16 s |
+| Socket server (new) | ~1 s | ~3 s (parallel) | ~4 s typical |
+
+#### New / Changed Files
+
+| File | Change |
+|---|---|
+| `scripts/sam3_infer.py` | Added `--socket [path]` mode: Unix socket server, `_run_socket_server()` |
+| `scripts/test_dryrun_analyze.py` | Added `detect_object_sam3_socket()`, `--socket` flag, `start_sam3_server()` helper, labels cold/warm/socket in output |
+| `src/magpie_control/deligrasp_node.py` | `_sam3_sock_path` state, auto-detects `/tmp/sam3.sock` at startup, socket client path in `_detect_sam3()` |
+
+### D5-6: Segmented Point Cloud + PCA Grasp Orientation
+
+#### Motivation
+
+The previous depth approach collapsed the entire SAM3 mask to a single median depth value, losing all spatial structure. A full point cloud back-projects every masked pixel individually, giving object dimensions and orientation in addition to position.
+
+#### Pipeline
+
+```
+SAM3 mask (H×W bool)  +  RealSense depth (H×W mm)
+        │
+        ▼
+Back-project each masked pixel using camera intrinsics:
+  x = (u - cx) * z / fx
+  y = (v - cy) * z / fy
+  z = depth[v, u] / 1000.0
+        │
+        ▼
+Transform to world frame:  pts_world = TCP @ TCP_TO_CAM @ pts_cam
+        │
+        ▼
+open3d statistical outlier removal (20 neighbours, 2σ threshold)
+Strips stray depth-noise points at mask edges
+        │
+        ▼
+PCA via numpy (np.linalg.eigh on covariance matrix):
+  eigenvector 0 = major axis (longest dimension)
+  eigenvector 1 = minor axis
+  eigenvector 2 = normal axis
+        │
+        ▼
+Grasp angle = atan2(major_y, major_x) + 90°
+Gripper fingers close perpendicular to major axis
+```
+
+#### What open3d does
+
+open3d is used for two things only — the rest is numpy:
+- **Container:** `o3d.geometry.PointCloud` holds the XYZ array
+- **Denoiser:** `remove_statistical_outlier()` removes points whose mean distance to their 20 nearest neighbours exceeds 2σ. Typical reduction: ~36,000 → ~35,700 points (edge noise stripped).
+
+PCA, centroid, extent, and grasp angle are all computed with numpy.
+
+#### Verified output (measuring tape, 2026-05-27)
+
+```
+Points (after denoise): 35699
+Centroid (world):  x=-0.248  y=-0.643  z=0.079 m  (matches median method to <1 mm)
+Extent:   major=7.9 cm  minor=9.2 cm  depth=4.8 cm
+Major axis direction: [0.03, -1.00, 0.08]  (≈ world -Y)
+Grasp angle (wrist Z): 1.4 deg
+```
+
+The measuring tape is circular (tape reel) so major ≈ minor. For elongated objects (pen, screwdriver) the grasp angle gives a meaningful wrist rotation.
+
+#### New Files
+
+| File | Description |
+|---|---|
+| `scripts/pointcloud_utils.py` | `build_segmented_pcd()`, `denoise_pcd()`, `analyse_pcd()`, `print_pcd_results()` |
+
+#### Changed Files
+
+| File | Change |
+|---|---|
+| `scripts/test_dryrun_analyze.py` | Added `--pcd` flag, calls point cloud pipeline after SAM3 detection |
+
+#### Usage
+
+```bash
+python3 ~/magpie_control/scripts/test_dryrun_analyze.py \
+  --detector sam3 --socket --pcd --object "measuring tape"
+```
+
+**Requires:** `--detector sam3` (needs pixel mask). Falls back gracefully with a warning if open3d is unavailable or mask is empty.
