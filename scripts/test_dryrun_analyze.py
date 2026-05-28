@@ -39,7 +39,7 @@ from google import genai
 from google.genai import types
 from magpie_control import poses
 from magpie_control.homog_utils import homog_xform, R_krot
-from magpie_control.gripper_arc import fingertip_drop as _gripper_drop, safe_grasp_z as _safe_grasp_z
+from magpie_control.gripper_arc import fingertip_drop as _gripper_drop
 
 # Must match deligrasp_node._TCP_TO_CAM
 _TCP_TO_CAM = homog_xform(
@@ -598,26 +598,22 @@ def main():
             print(f'  Approach: fingertip Z={approach_fz:.3f} m  TCP Z={approach_tcp_z:.3f} m')
             print(f'  Grasp:    fingertip Z={grasp_fz:.3f} m  TCP Z={grasp_tcp_z:.3f} m')
 
-            # ── Pre-flight safety check — hard abort if unsafe ────────────────
-            # Approach: gripper open, no closing drop needed
+            # ── Pre-flight safety check — will it crash? ─────────────────────
             approach_safe = approach_fz >= HARD_FLOOR_Z
-            # Grasp: required Z depends on how much the gripper closes (arc model)
-            goal_ap_mm   = float(gp['aperture_mm']) if gp else 0.0  # worst case if descriptor failed
-            close_drop   = _gripper_drop(103.6, goal_ap_mm)
-            min_grasp_z  = _safe_grasp_z(goal_ap_mm, HARD_FLOOR_Z)  # floor + arc drop
-            grasp_safe   = grasp_fz >= min_grasp_z
 
-            print(f'\n=== SAFETY PRE-FLIGHT ===')
-            print(f'  Physical floor:   {HARD_FLOOR_Z:.3f} m')
-            print(f'  Goal aperture:    {goal_ap_mm:.1f} mm  →  worst-case arc drop {close_drop*1000:.1f} mm')
-            print(f'  Min grasp Z:      {min_grasp_z:.3f} m  (floor + drop, 4-bar arc model)')
-            print(f'  Approach: {approach_fz:.3f} m  {"✓ SAFE" if approach_safe else "✗ UNSAFE — TOO LOW"}')
-            print(f'  Grasp:    {grasp_fz:.3f} m  (need ≥ {min_grasp_z:.3f})  '
-                  f'{"✓ SAFE" if grasp_safe else "✗ UNSAFE — WOULD HIT FLOOR WHEN CLOSING"}')
-            print(f'=========================')
+            goal_ap_mm   = float(gp['aperture_mm']) if gp else 0.0
+            close_drop   = _gripper_drop(103.6, goal_ap_mm)
+            grasp_eff_z  = grasp_fz - close_drop   # fingertip Z after closing
+            grasp_safe   = grasp_eff_z >= HARD_FLOOR_Z
+
+            print(f'\n=== SAFETY CHECK ===')
+            print(f'  Floor (table): {HARD_FLOOR_Z:.3f} m')
+            print(f'  Approach: fingertip {approach_fz:.3f} m  {"✓" if approach_safe else "✗ BELOW FLOOR"}')
+            print(f'  Grasp:    open {grasp_fz:.3f} m  −  {close_drop*1000:.0f} mm arc drop'
+                  f'  →  {grasp_eff_z:.3f} m  {"✓" if grasp_safe else "✗ WOULD HIT FLOOR"}')
+            print(f'====================')
             if not approach_safe or not grasp_safe:
-                print('\nABORTED — arm would crash into floor with these parameters.')
-                print('Adjust --approach-height / --grasp-offset, or move object higher.')
+                print('\nABORTED — fingertip would crash into floor. Raise object or adjust --grasp-offset.')
                 node.destroy_node()
                 rclpy.shutdown()
                 sys.exit(1)

@@ -38,7 +38,7 @@ from magpie_msgs.msg import DeliGraspParams
 
 from magpie_control.homog_utils import homog_xform, R_krot
 from magpie_control import poses
-from magpie_control.gripper_arc import fingertip_drop as _gripper_drop, safe_grasp_z as _safe_grasp_z
+from magpie_control.gripper_arc import fingertip_drop as _gripper_drop
 
 # TCP-to-camera transform — matches _CAMERA_XFORM in ur5.py
 _TCP_TO_CAM = homog_xform(
@@ -74,29 +74,25 @@ def _straight_down_rotation(grasp_angle_deg=0.0):
 
 
 def check_pose_safe(tcp_matrix, label='pose', aperture_close_mm=None):
-    """Raise ValueError if the fingertip would hit the floor.
+    """Raise ValueError if the fingertip would crash into the floor.
 
-    For grasp poses, pass aperture_close_mm (Gemini goal aperture, mm) so the
-    required fingertip Z is computed from the 4-bar arc model. The required Z
-    scales with how much the gripper closes — small objects need more clearance
-    because the arc passes through its peak (~31.5 mm) on the way to close.
-
-    If aperture_close_mm is None and the label contains 'grasp', worst-case
-    (fully closed, 0 mm, peak-arc drop ~25 mm) is assumed.
+    For grasp poses pass aperture_close_mm (Gemini goal aperture) so the arc
+    drop is subtracted from the open-fingertip Z and compared against the
+    physical floor. For other poses (approach, retreat) the gripper is open
+    so no drop is applied.
     """
     fingertip_z = fingertip_world_pos(tcp_matrix)[2]
     if 'grasp' in label.lower():
-        ap = aperture_close_mm if aperture_close_mm is not None else 0.0
-        floor = _safe_grasp_z(ap, HARD_FLOOR_Z)
-        drop  = _gripper_drop(103.6, ap)
+        ap   = aperture_close_mm if aperture_close_mm is not None else 0.0
+        drop = _gripper_drop(103.6, ap)
     else:
-        floor = HARD_FLOOR_Z
-        drop  = 0.0
-    if fingertip_z < floor:
+        drop = 0.0
+    effective_z = fingertip_z - drop
+    if effective_z < HARD_FLOOR_Z:
         raise ValueError(
-            f'{label}: fingertip Z={fingertip_z:.3f} m, '
-            f'goal aperture={aperture_close_mm} mm, closing drop≤{drop*1000:.1f} mm '
-            f'→ need ≥{floor:.3f} m, have {fingertip_z:.3f} m'
+            f'{label}: open fingertip={fingertip_z:.3f} m, '
+            f'arc drop={drop*1000:.1f} mm → after close={effective_z:.3f} m '
+            f'< floor {HARD_FLOOR_Z:.3f} m'
         )
 
 # DeliGrasp descriptor prompt — text-only, from deligrasp.github.io/assets/prompts/dg_descriptor.txt
