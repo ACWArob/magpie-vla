@@ -637,6 +637,66 @@ Both constants must match between `deligrasp_node.py` and `test_dryrun_analyze.p
 
 ---
 
+## Stage 5g — Arc-Based Safety (2026-05-28)
+
+**Purpose:** Replace fixed `MIN_FINGERTIP_Z` with a per-object arc model from the MuJoCo gripper XML. The required safe grasp Z now scales with how much the gripper closes — small objects need more clearance (~55 mm), large objects need less (~45 mm for 80 mm aperture).
+
+**New module:** `src/magpie_control/gripper_arc.py`
+
+### Test A — `fingertip_drop` / `safe_grasp_z` values
+
+```python
+from magpie_control.gripper_arc import fingertip_drop, safe_grasp_z, PEAK_APERTURE_MM
+
+print(PEAK_APERTURE_MM)          # should be ~31.5 mm
+print(fingertip_drop(103.6, 0.0))   # ~0.025 m (peak applies, not endpoint)
+print(fingertip_drop(103.6, 80.0))  # ~0.015 m (large object, no peak overshoot)
+print(safe_grasp_z(0.0))            # ~0.055 m
+print(safe_grasp_z(80.0))           # ~0.045 m
+```
+
+**Expected output:**
+```
+31.5...
+0.024...
+0.015...
+0.055...
+0.044...
+```
+
+### Test B — Safety pre-flight shows arc model output
+
+```bash
+export GEMINI_API_KEY=...
+python3 scripts/test_dryrun_analyze.py --detector gemini --object "pen"
+```
+
+**Expected in pre-flight block:**
+```
+  Physical floor:   0.030 m
+  Goal aperture:    XX.X mm  →  worst-case arc drop YY.Y mm
+  Min grasp Z:      Z.ZZZ m  (floor + drop, 4-bar arc model)
+  Approach: ...  ✓ SAFE
+  Grasp:    ...  (need ≥ Z.ZZZ)  ✓ SAFE
+```
+
+### Test C — Large vs small object shows different safe Z
+
+Run two back-to-back dry runs (same arm position), one with a large object and one with a small one. Verify that:
+- Large object (goal aperture ~80 mm): `Min grasp Z ≈ 0.045 m`
+- Small object (goal aperture ~20 mm): `Min grasp Z ≈ 0.055 m`
+
+### Constants (updated)
+
+| Constant | Value | Source |
+|---|---|---|
+| `HARD_FLOOR_Z` | 0.030 m | Physical floor, open-gripper measurement 2026-05-27 |
+| `GRIPPER_LENGTH` | 0.231 m | `magpie_tooltip[2]` in ur5.py |
+| `PEAK_APERTURE_MM` | ~31.5 mm | `gripper_arc.py` from MuJoCo XML geometry |
+| Arc calibration `_K` | ~1.377 | Fitted: 103.6→0 mm = 21 mm measured |
+
+---
+
 ## Stage 6 — Arm + Gripper (coordinated motion)
 
 **Hardware required:** UR5 powered + initialized, MAGPIE gripper mounted on end-effector (12V + USB). Ethernet to robot network. **Clear the area around the arm before running.**

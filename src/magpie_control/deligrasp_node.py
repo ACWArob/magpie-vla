@@ -38,6 +38,7 @@ from magpie_msgs.msg import DeliGraspParams
 
 from magpie_control.homog_utils import homog_xform, R_krot
 from magpie_control import poses
+from magpie_control.gripper_arc import fingertip_drop as _gripper_drop, safe_grasp_z as _safe_grasp_z
 
 # TCP-to-camera transform — matches _CAMERA_XFORM in ur5.py
 _TCP_TO_CAM = homog_xform(
@@ -51,11 +52,10 @@ _TCP_TO_CAM = homog_xform(
 # intended height, not the wrist.
 GRIPPER_LENGTH = 0.231  # metres — wrist flange to fingertip (matches magpie_tooltip[2] in ur5.py)
 
-# Lowest safe fingertip Z — measured 2026-05-27 in teach mode.
-# Closed gripper at floor limit: TCP=0.282 m → fingertip=0.051 m. Adjusted to 0.047 m.
-# Used for ALL poses (approach, grasp, retreat) so the arm never reaches a height
-# where closing the gripper could hit the floor.
-MIN_FINGERTIP_Z = 0.047  # metres
+# Physical floor limit for the open-gripper fingertip Z (measured 2026-05-27).
+# At the lowest safe position with open gripper: TCP = 0.261 m → fingertip = 0.030 m.
+# Grasp poses additionally subtract the closing arc drop (see check_pose_safe).
+HARD_FLOOR_Z = 0.030  # metres
 
 
 def fingertip_world_pos(tcp_matrix):
@@ -73,13 +73,30 @@ def _straight_down_rotation(grasp_angle_deg=0.0):
     return np.array([[c, s, 0], [s, -c, 0], [0, 0, -1]])
 
 
-def check_pose_safe(tcp_matrix, label='pose'):
-    """Raise ValueError if fingertip would go below MIN_FINGERTIP_Z."""
-    fingertip = fingertip_world_pos(tcp_matrix)
-    if fingertip[2] < MIN_FINGERTIP_Z:
+def check_pose_safe(tcp_matrix, label='pose', aperture_close_mm=None):
+    """Raise ValueError if the fingertip would hit the floor.
+
+    For grasp poses, pass aperture_close_mm (Gemini goal aperture, mm) so the
+    required fingertip Z is computed from the 4-bar arc model. The required Z
+    scales with how much the gripper closes — small objects need more clearance
+    because the arc passes through its peak (~31.5 mm) on the way to close.
+
+    If aperture_close_mm is None and the label contains 'grasp', worst-case
+    (fully closed, 0 mm, peak-arc drop ~25 mm) is assumed.
+    """
+    fingertip_z = fingertip_world_pos(tcp_matrix)[2]
+    if 'grasp' in label.lower():
+        ap = aperture_close_mm if aperture_close_mm is not None else 0.0
+        floor = _safe_grasp_z(ap, HARD_FLOOR_Z)
+        drop  = _gripper_drop(103.6, ap)
+    else:
+        floor = HARD_FLOOR_Z
+        drop  = 0.0
+    if fingertip_z < floor:
         raise ValueError(
-            f'{label}: fingertip Z={fingertip[2]:.3f} m would go below '
-            f'floor limit {MIN_FINGERTIP_Z:.3f} m'
+            f'{label}: fingertip Z={fingertip_z:.3f} m, '
+            f'goal aperture={aperture_close_mm} mm, closing drop≤{drop*1000:.1f} mm '
+            f'→ need ≥{floor:.3f} m, have {fingertip_z:.3f} m'
         )
 
 # DeliGrasp descriptor prompt — text-only, from deligrasp.github.io/assets/prompts/dg_descriptor.txt
@@ -779,6 +796,17 @@ class DeliGraspNode(Node):
         self._call(self.cli_open, Trigger.Request())
         time.sleep(0.3)
 
+        # ── 4.5 Collect descriptor (needed for goal aperture in safety check) ─
+        # Detection + descriptor were launched in parallel; by the time detection
+        # finished and we moved to approach, the Gemini I/O call is done.
+        desc_result = None
+        if use_gemini and desc_fut is not None:
+            try:
+                desc_result = desc_fut.result(timeout=30.0)
+            except Exception as e:
+                self.get_logger().error(f'Gemini descriptor failed: {e} — using defaults')
+        goal_aperture_mm = float(desc_result['goal_aperture_mm']) if desc_result else 30.0
+
         # ── 5. Move to approach pose ───────────────────────────────────────
         # Orientation: straight down, wrist rotated by PCA grasp angle so
         # fingers grip perpendicular to the object's major axis.
@@ -801,7 +829,7 @@ class DeliGraspNode(Node):
         grasp = approach.copy()
         grasp[2, 3] = p_world[2] - grasp_off + GRIPPER_LENGTH
 
-        check_pose_safe(grasp, 'grasp')
+        check_pose_safe(grasp, 'grasp', aperture_close_mm=goal_aperture_mm)
         self.get_logger().info('Descending to grasp pose')
         self._move_l(grasp, speed=0.05, accel=0.1)
 
@@ -811,21 +839,11 @@ class DeliGraspNode(Node):
         params.goal_aperture    = 30.0
         params.complete_grasp   = True
 
-        if use_gemini and desc_fut is not None:
-            try:
-                gp = desc_fut.result(timeout=30.0)  # likely already done
-                if gp is None:
-                    raise RuntimeError('Descriptor parsing returned None')
-                params.initial_force      = float(gp['initial_force'])
-                params.additional_force   = float(gp['additional_force'])
-                params.additional_closure = float(gp['additional_closure'])
-                params.goal_aperture      = float(gp['goal_aperture_mm'])
-            except Exception as e:
-                self.get_logger().error(
-                    f'Gemini descriptor failed: {e} — using config defaults')
-                params.initial_force      = float(self.get_parameter('initial_force').value)
-                params.additional_force   = float(self.get_parameter('additional_force').value)
-                params.additional_closure = float(self.get_parameter('additional_closure').value)
+        if use_gemini and desc_result is not None:
+            params.initial_force      = float(desc_result['initial_force'])
+            params.additional_force   = float(desc_result['additional_force'])
+            params.additional_closure = float(desc_result['additional_closure'])
+            params.goal_aperture      = float(desc_result['goal_aperture_mm'])
         else:
             params.initial_force      = float(self.get_parameter('initial_force').value)
             params.additional_force   = float(self.get_parameter('additional_force').value)

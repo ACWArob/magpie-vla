@@ -1538,3 +1538,70 @@ Both fingers returned to symmetric operation (~50 mm each when open, total ~103 
 ### TODO: MuJoCo Collision Checking
 
 The UR5 has a publicly available MuJoCo XML model (MJCF). In the future, this can be loaded into a collision-checking pipeline to give per-pose floor and obstacle clearance based on the full kinematic chain rather than the single fingertip Z heuristic. Parked for now — current safety checks are sufficient for tabletop operation.
+
+---
+
+## Day 6 — 2026-05-28 A: Arc-Based Fingertip Drop Safety
+
+### D6A-1: Motivation — Replacing the Fixed Floor Constant
+
+**Professor feedback:** The single fixed `MIN_FINGERTIP_Z = 0.047 m` was too blunt. It was simultaneously too conservative for large objects (causing the arm to refuse valid grasps near the floor) and not conservative enough for small objects (where the gripper closes almost fully, and the arc drop is larger). The correct approach: calculate the drop from the gripper's 4-bar linkage geometry as a function of how much the gripper closes for a given object.
+
+---
+
+### D6A-2: Gripper Arc Model — `src/magpie_control/gripper_arc.py`
+
+**Source geometry:** `https://github.com/correlllab/h1_mujoco/blob/main/magpie/ur5e.xml`
+
+The Magpie gripper fingers are driven by a **parallelogram 4-bar linkage** (a = c ≈ 0.04500 m, b = d ≈ 0.02236 m in the YZ plane of `base_top` frame). Because it is a parallelogram, the `finger_combined` body **translates without rotating**, so the vertical fingertip drop equals the crank-arc Z-component.
+
+**Key parameter derivations from the XML:**
+| Symbol | Value | Source |
+|--------|-------|--------|
+| Crank pivot Y | 0.038 m | `left_crank` body position |
+| Crank length | 0.04500 m | distance pivot1→pivot2 in YZ |
+| Initial crank angle φ₀ | 0.4836 rad | atan2(0.020953, 0.039824) |
+| Pad Y offset | 0.02227 m | `pad_box` positions in `left_finger_combined` |
+| Arc peak aperture | ~31.5 mm | when φ₀+θ = π/2 |
+
+**Arc peak:** The crank peaks (maximum Z drop) at finger aperture ≈ 31.5 mm. For any goal aperture below 31.5 mm, the gripper passes through the peak during closing, so the worst-case drop occurs at ~31.5 mm — not at the final position.
+
+**Calibration scale _K ≈ 1.377:** Fitted from measured 21 mm drop (103.6 → 0 mm, 2026-05-27).
+
+**Drop table (from 103.6 mm open):**
+| Goal aperture | Arc drop | Required safe grasp Z |
+|--------------|----------|----------------------|
+| 103.6 mm | 0 mm | 0.030 m |
+| 80 mm | ~15 mm | 0.045 m |
+| 50 mm | ~24 mm | 0.054 m |
+| ≤ 31.5 mm | ~25 mm (peak) | 0.055 m |
+| 0 mm (fully closed) | ~25 mm (peak applies) | 0.055 m |
+
+**Public API:**
+- `fingertip_drop(aperture_open_mm, aperture_close_mm)` — worst-case downward displacement (m) during closing; uses arc peak for goals ≤ 31.5 mm
+- `safe_grasp_z(aperture_close_mm, floor_z=0.030)` — minimum open-gripper fingertip Z required so closing to the goal aperture clears the physical floor
+
+---
+
+### D6A-3: Safety Check Changes
+
+**`deligrasp_node.py`:**
+- Removed `MIN_FINGERTIP_Z = 0.047` → replaced with `HARD_FLOOR_Z = 0.030` (physical floor, open-gripper measurement)
+- `check_pose_safe(tcp_matrix, label, aperture_close_mm=None)` now calls `safe_grasp_z(ap, HARD_FLOOR_Z)` for grasp poses — required Z adapts to goal aperture
+- Descriptor collected early (after approach move, before grasp safety check) so `goal_aperture_mm` is available for the check
+
+**`test_dryrun_analyze.py`:**
+- Same `HARD_FLOOR_Z = 0.030` constant
+- Descriptor collected alongside detection result (parallel, then both awaited)
+- Safety pre-flight prints `goal_aperture`, `arc drop`, and `min_grasp_z` dynamically
+
+**Practical effect:**
+```
+=== SAFETY PRE-FLIGHT ===
+  Physical floor:   0.030 m
+  Goal aperture:    30.0 mm  →  worst-case arc drop 24.9 mm
+  Min grasp Z:      0.055 m  (floor + drop, 4-bar arc model)
+  Approach: 0.165 m  ✓ SAFE
+  Grasp:    0.085 m  (need ≥ 0.055)  ✓ SAFE
+=========================
+```

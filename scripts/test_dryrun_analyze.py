@@ -23,8 +23,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 # ── Safety constants — MUST match deligrasp_node.py ──────────────────────────
-GRIPPER_LENGTH  = 0.231   # m  wrist flange → fingertip
-MIN_FINGERTIP_Z = 0.047   # m  floor limit (closed gripper, teach mode 2026-05-27)
+GRIPPER_LENGTH = 0.231   # m  wrist flange → fingertip (open gripper)
+HARD_FLOOR_Z   = 0.030   # m  physical floor limit (open-fingertip Z, measured 2026-05-27)
 # ─────────────────────────────────────────────────────────────────────────────
 
 import cv2
@@ -39,6 +39,7 @@ from google import genai
 from google.genai import types
 from magpie_control import poses
 from magpie_control.homog_utils import homog_xform, R_krot
+from magpie_control.gripper_arc import fingertip_drop as _gripper_drop, safe_grasp_z as _safe_grasp_z
 
 # Must match deligrasp_node._TCP_TO_CAM
 _TCP_TO_CAM = homog_xform(
@@ -501,8 +502,15 @@ def main():
     desc_fut = _pool.submit(call_descriptor, args.object, api_key)
     _pool.shutdown(wait=False)
 
-    # Unpack detection (blocks until done; descriptor runs concurrently)
+    # Collect both futures — descriptor was running concurrently and is almost certainly
+    # done by the time detection finishes (both are I/O-bound Gemini or CPU-bound DINO).
     det_result = det_fut.result()
+    try:
+        gp = desc_fut.result(timeout=30.0)
+    except Exception as e:
+        print(f'  [WARN] Gemini descriptor failed: {e} — safety check will use worst-case aperture')
+        gp = None
+
     seg_mask = None
     if args.detector == 'sam3':
         boxes, labels, scores, seg_mask = det_result
@@ -591,14 +599,21 @@ def main():
             print(f'  Grasp:    fingertip Z={grasp_fz:.3f} m  TCP Z={grasp_tcp_z:.3f} m')
 
             # ── Pre-flight safety check — hard abort if unsafe ────────────────
-            approach_safe = approach_fz >= MIN_FINGERTIP_Z
-            grasp_safe    = grasp_fz    >= MIN_FINGERTIP_Z
+            # Approach: gripper open, no closing drop needed
+            approach_safe = approach_fz >= HARD_FLOOR_Z
+            # Grasp: required Z depends on how much the gripper closes (arc model)
+            goal_ap_mm   = float(gp['aperture_mm']) if gp else 0.0  # worst case if descriptor failed
+            close_drop   = _gripper_drop(103.6, goal_ap_mm)
+            min_grasp_z  = _safe_grasp_z(goal_ap_mm, HARD_FLOOR_Z)  # floor + arc drop
+            grasp_safe   = grasp_fz >= min_grasp_z
+
             print(f'\n=== SAFETY PRE-FLIGHT ===')
-            print(f'  Floor limit: {MIN_FINGERTIP_Z:.3f} m  (closed-gripper floor, applies to all poses)')
-            print(f'  Approach fingertip Z: {approach_fz:.3f} m  '
-                  f'{"✓ SAFE" if approach_safe else "✗ UNSAFE — TOO LOW"}')
-            print(f'  Grasp    fingertip Z: {grasp_fz:.3f} m  '
-                  f'{"✓ SAFE" if grasp_safe else "✗ UNSAFE — TOO LOW (finger close drop not accounted)"}')
+            print(f'  Physical floor:   {HARD_FLOOR_Z:.3f} m')
+            print(f'  Goal aperture:    {goal_ap_mm:.1f} mm  →  worst-case arc drop {close_drop*1000:.1f} mm')
+            print(f'  Min grasp Z:      {min_grasp_z:.3f} m  (floor + drop, 4-bar arc model)')
+            print(f'  Approach: {approach_fz:.3f} m  {"✓ SAFE" if approach_safe else "✗ UNSAFE — TOO LOW"}')
+            print(f'  Grasp:    {grasp_fz:.3f} m  (need ≥ {min_grasp_z:.3f})  '
+                  f'{"✓ SAFE" if grasp_safe else "✗ UNSAFE — WOULD HIT FLOOR WHEN CLOSING"}')
             print(f'=========================')
             if not approach_safe or not grasp_safe:
                 print('\nABORTED — arm would crash into floor with these parameters.')
@@ -627,10 +642,9 @@ def main():
     elif args.pcd and args.detector != 'sam3':
         print('  [WARN] --pcd requires --detector sam3 (needs pixel mask)')
 
-    # ── 5. Gemini DeliGrasp descriptor (already running since step 2) ─────────
-    print(f'\nGemini descriptor for "{args.object}" (collecting result)...')
-    try:
-        gp = desc_fut.result(timeout=30.0)
+    # ── 5. Gemini DeliGrasp descriptor (already collected above) ─────────────
+    print(f'\nGemini descriptor for "{args.object}":')
+    if gp is not None:
         print('=== GRIP PARAMETERS (computed from descriptor) ===')
         print(f'  Object mass       : {gp["mass_g"]:.0f} g')
         print(f'  Spring constant   : {gp["k"]:.0f} N/m')
@@ -640,8 +654,8 @@ def main():
         print(f'  Initial force     : {gp["initial_force"]:.3f} N   ← set before close')
         print(f'  Additional force  : {gp["add_force"]:.3f} N   ← added per slip')
         print('==================================================')
-    except Exception as e:
-        print(f'Gemini descriptor failed: {e}')
+    else:
+        print('  (descriptor failed — see earlier warning)')
 
     # ── 5. Summary ────────────────────────────────────────────────────────────
     print('\n=== DRY RUN SUMMARY ===')
