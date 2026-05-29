@@ -1,0 +1,14 @@
+{
+    "python.analysis.extraPaths": [
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/home/user/ws_ctrl/install/magpie_msgs/local/lib/python3.10/dist-packages",
+        "/home/user/Downloads/May_14/magpie_control-main/src"
+    ],
+    "python.autoComplete.extraPaths": [
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/home/user/ws_ctrl/install/magpie_msgs/local/lib/python3.10/dist-packages",
+        "/home/user/Downloads/May_14/magpie_control-main/src"
+    ]
+}

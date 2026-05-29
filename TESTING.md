@@ -901,3 +901,254 @@ ros2 action send_goal /deligrasp magpie_msgs/action/DeliGrasp \
 - The TCP is the wrist — with gripper mounted the fingertips are ~230 mm lower. Set `approach_height` conservatively (0.10–0.15 m) to avoid the gripper hitting the table on descent
 - If deligrasp_node fails to detect the object, increase `detection_confidence` downward (e.g. 0.2) or adjust `object_query` to match the object more precisely
 - `GEMINI_API_KEY` must be exported in the same terminal that starts deligrasp_node (Option B Terminal 4) or the whole launch shell (Option A)
+
+---
+
+## Stage 8 — Half-Run: Arm Positioning Verification (2026-05-28)
+
+Verifies arm positions approach and grasp poses over a detected object without closing the gripper. Use this before any first full grasp on a new object or setup.
+
+**Hardware required:** UR5 arm + MAGPIE gripper + RealSense camera mounted. Ethernet to robot network.
+
+**Prerequisites:**
+```bash
+export GEMINI_API_KEY=your_key
+
+# Terminal 1 — arm node
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+ros2 run magpie_control ur5_node
+
+# Terminal 2 — gripper node
+sg dialout -c "bash -c 'source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash && ros2 run magpie_control gripper_node'"
+
+# Terminal 3 — camera
+source /opt/ros/humble/setup.bash
+ros2 launch realsense2_camera rs_launch.py camera_name:=gripper_camera
+
+# Terminal 4 — SAM3 socket server (leave running)
+~/sam3_env/bin/python3 ~/magpie_control/scripts/sam3_infer.py --socket
+# Wait for: {"status": "ready", "socket": "/tmp/sam3.sock"}
+```
+
+**Terminal 5 — run half-run test:**
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 ~/magpie_control/scripts/test_halfrun.py --object "red block" --socket --grasp-offset 0.01
+```
+
+**What it does:**
+1. Waits for color + depth + camera_info + TCP pose
+2. Detects object with SAM3 socket (~1 s)
+3. Samples depth from all SAM3 mask pixels (median) — avoids color/depth parallax
+4. Back-projects to world frame using live TCP + `_TCP_TO_CAM` extrinsic
+5. Computes approach (10 cm above object) and grasp (1 cm below object surface) TCP poses
+6. Runs safety check — aborts if fingertip would hit floor after arc drop
+7. Disables teach mode (toggle-aware — checks message for "enabled" to detect current state)
+8. Opens gripper, moves to approach, descends to grasp, **holds 2 s**, retreats to approach, returns to starting TCP pose
+
+**Expected output:**
+```
+Waiting for sensor data...
+  Sensor data received.
+  SAM3 mask: XXXXX pixels  score=0.XXX
+  Using SAM3 mask depth (XXXX pixels)
+  Object: x=X.XXX  y=X.XXX  z=X.XXX m
+
+=== SAFETY CHECK ===
+  Floor (table): 0.030 m
+  Approach: fingertip X.XXX m  ✓
+  Grasp:    open X.XXX m  −  XX mm arc drop  →  X.XXX m  ✓
+====================
+
+Disabling teach mode...
+  Teach mode: Teach mode disabled
+Opening gripper...
+  Gripper: Gripper opened successfully
+Moving to approach pose...
+  At approach. Fingertip ~X.XXX m above table.
+Descending to grasp pose...
+  At grasp. Fingertip ~X.XXX m. Inspect position now.
+Retreating to approach height...
+Returning to starting position...
+Half-run complete — positions verified.
+```
+
+**Expected results:**
+
+| Check | Expected |
+|---|---|
+| Safety check | Both approach and grasp show ✓ |
+| Teach mode | `Teach mode: Teach mode disabled` (not "enabled") |
+| Approach height | Fingertip ~10 cm above detected object Z |
+| Grasp position | Fingertip within 1–2 cm of object top (visual check) |
+| Return | Arm returns to original starting position exactly |
+
+**Tuning by object:**
+
+| Object | Recommended `--grasp-offset` | Notes |
+|---|---|---|
+| Red block (~38 mm, z≈0.072 m) | 0.01 m | Standard; 0.02 fails safety (arc hits floor) |
+| Tape measure (round, z≈0.080 m) | 0.02 m | Taller object, more room; need 0.02 to reach sides |
+| Flat object (z < 0.050 m) | 0.005 m | Check safety output carefully |
+
+**Diagnostics:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `success=True` but arm does not move | RTDE stale connection | `kill -9` ur5_node PIDs, restart |
+| `Teach mode: Teach mode enabled` (stays enabled) | ur5_node has stale teach state | Restart ur5_node |
+| Safety check aborts | Object too low or grasp-offset too large | Decrease `--grasp-offset` |
+| `no valid depth at detection centroid` | SAM3 mask lands on zero-depth area | Object may be at camera edge; reposition |
+
+**Arm connection check (before half-run):**
+```bash
+python3 ~/magpie_control/scripts/test_move_up.py
+```
+If arm does not physically move → restart ur5_node before proceeding.
+
+**Verified (2026-05-28, red block, RTX 2070):**
+- Object at z=0.071 m, approach fingertip 0.171 m, grasp fingertip 0.061 m
+- Arc drop 21 mm → effective 0.040 m > 0.030 floor ✓
+- Arm reached both positions correctly; position visually confirmed ✓
+
+---
+
+## Stage 9 — Full Grasp Pipeline (2026-05-28)
+
+Full autonomous grasp: SAM3 + Gemini descriptor in parallel, PCA wrist rotation, descend, force-controlled close, lift and return.
+
+**Hardware required:** UR5 + MAGPIE gripper + RealSense camera. Ethernet to robot. **Clear table of anything other than the target object.**
+
+**Prerequisites:** Same four nodes as Stage 8 (arm, gripper, camera, SAM3 socket server).
+
+```bash
+export GEMINI_API_KEY=your_key
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+```
+
+---
+
+### Test A — Specify object
+
+```bash
+python3 ~/magpie_control/scripts/test_fullrun.py \
+  --object "red block" --socket --grasp-offset 0.01
+```
+
+### Test B — Auto-identify object (no `--object`)
+
+```bash
+python3 ~/magpie_control/scripts/test_fullrun.py --socket --grasp-offset 0.01
+```
+
+Gemini identifies the object from the camera frame ("What is the main graspable object?"). The detected name is then used for SAM3 detection and the DeliGrasp descriptor.
+
+**Note on Gemini 2.5 thinking leakage:** Gemini 2.5 Flash returns its chain-of-thought reasoning in `response.text`. The script strips this automatically with a regex that extracts the last short phrase. You may still see the chain-of-thought printed to the terminal if `--detector gemini` is used elsewhere, but the extracted name will be correct (e.g. `"red cube"`).
+
+### Test C — Dry-run (no motion)
+
+```bash
+python3 ~/magpie_control/scripts/test_fullrun.py --socket --grasp-offset 0.01 --dry-run
+```
+
+Prints all detection, descriptor, and safety output — arm and gripper do not move.
+
+---
+
+**What it does:**
+1. Waits for sensor data
+2. Auto-identifies object (if `--object` not given)
+3. Runs SAM3 socket detection + Gemini DeliGrasp descriptor **in parallel** (ThreadPoolExecutor, ~3 s total)
+4. Computes world XYZ from SAM3 mask depth median
+5. Prints grip parameters (mass, μ, k, goal aperture, initial force)
+6. Safety check: approach_fz and effective grasp_fz (after arc drop using descriptor aperture) vs floor
+7. Disables teach mode, opens gripper
+8. Moves to approach (15 cm/s)
+9. Re-detects at approach height, runs PCA on point cloud — applies wrist rotation if elongation ≥ 1.5×; skips if nearly square
+10. Descends to grasp (5 cm/s)
+11. `set_force(initial_force)` → `close()` → waits 2.5 s for gripper to seat
+12. Lifts to approach height (5 cm/s)
+13. Returns to starting TCP (15 cm/s)
+14. Opens gripper to release
+
+**Expected output (excerpt):**
+```
+Running SAM3 (socket ~1s) + Gemini descriptor for "red block" in parallel...
+  SAM3 mask: XXXXX pixels  score=0.XXX
+
+--- Gemini DeliGrasp Descriptor ---
+[start of description]
+...
+[end of description]
+
+  Object: x=X.XXX  y=X.XXX  z=X.XXX m
+
+=== GRIP PARAMETERS ===
+  Mass: XXX g   μ=X.XX   k=XXXX N/m
+  Goal aperture: XX.X mm
+  Initial force: X.XXX N
+=======================
+
+=== SAFETY CHECK ===
+  Floor (table): 0.030 m
+  Approach: fingertip X.XXX m  ✓
+  Grasp:    open X.XXX m  −  XX mm arc drop  →  X.XXX m  ✓
+====================
+
+Getting PCA rotation from approach height...
+  SAM3 mask: XXXXX pixels  score=0.XXX
+  PCA: extent X.X × X.X cm  elongation=X.Xx  angle=X.X deg
+  → nearly square — keeping default rotation    [OR]
+  → Rotating wrist X.X deg...
+
+Descending to grasp pose...
+Closing gripper...
+  Force limit: X.XXX N  (Force limit set to X.XX N)
+  Gripper: Gripper closed successfully
+Lifting to approach height...
+Returning to starting position...
+Releasing object...
+  Gripper: Gripper opened successfully
+Full grasp complete.
+```
+
+**Expected results:**
+
+| Check | Expected |
+|---|---|
+| SAM3 detection | score > 0.8, mask > 1000 pixels |
+| Descriptor parsed | All fields: mass, k, μ, aperture, closure |
+| Safety check | Both ✓ |
+| Force limit | Applied before close (visible in gripper node logs) |
+| Gripper close | `Gripper closed successfully` within 2.5 s |
+| Object lifted | Visually confirm object rises with arm |
+| Object released | Gripper opens, object drops at starting position |
+
+**Object-specific parameters verified (2026-05-28):**
+
+| Object | `--grasp-offset` | `--min-force` | Result |
+|---|---|---|---|
+| Red block (~38 mm) | 0.01 m | — | Successful grasp + lift ✓ |
+| Tape measure (round) | 0.02 m | 7.0 N | Descriptor force (~3.5 N) insufficient for curved surface; override needed ✓ |
+| Pink cube | 0.01 m | — | PCA skipped (1.0× elongation) ✓ |
+
+**PCA rotation behaviour:**
+
+| Object shape | Elongation | PCA result |
+|---|---|---|
+| Square / circular | < 1.5× | Skipped — axes unreliable, rotation would be noise |
+| Elongated (tape, ruler, pen) | ≥ 1.5× | Wrist rotated to grip across short axis |
+| Wrist angle range | Always | Folded to [−90°, 90°] — gripper is symmetric, never rotates more than 90° |
+
+**Diagnostics:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Gripper closes but arm starts lifting before fully seated | Close is non-blocking, motor slow at low force | Increase `time.sleep` after close; already 2.5 s — if still early, check motor torque |
+| Object slips during lift | Descriptor force too low for actual weight/friction | Add `--min-force 5.0` (or higher) |
+| `DeliGrasp failed: no running event loop` | gripper_node's `async def` action callback has no event loop | Already fixed — script uses `set_force` + `close` Trigger instead |
+| ABORTED — would crash | grasp-offset too large for object height | Decrease `--grasp-offset` |
+| Gemini object name is multi-paragraph | Gemini 2.5 thinking leakage | Already fixed — regex strips to final phrase |
+| Centering loop sends arm wrong direction | World XY recomputation equals approach XY (no delta) | Already fixed — centering removed, PCA re-detect used instead |
+
+**Note on DeliGrasp action:** The `/gripper/deligrasp` action server's callback is `async def` and requires an asyncio event loop that is not present in a synchronous `rclpy.spin_until_future_complete` context. Sending a goal results in `RuntimeError: no running event loop` inside the gripper_node. The workaround — `set_force` (sets motor torque limit persistently) followed by `close` Trigger — applies the descriptor's `initial_force` and closes until contact. Slip detection (`additional_closure`, `additional_force`) is not active with this approach.

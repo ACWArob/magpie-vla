@@ -85,14 +85,15 @@ class HalfRunNode(Node):
         self.camera_info = None
         self.tcp_matrix  = None
 
-        self.create_subscription(Image,      '/camera/gripper_camera/color/image_raw',      self._color_cb,   1)
-        self.create_subscription(Image,      '/camera/gripper_camera/depth/image_rect_raw', self._depth_cb,   1)
-        self.create_subscription(CameraInfo, '/camera/gripper_camera/color/camera_info',    self._caminfo_cb, 1)
-        self.create_subscription(PoseStamped,'/arm/tcp_pose',                               self._tcp_cb,     1)
+        self.create_subscription(Image,       '/camera/gripper_camera/color/image_raw',      self._color_cb,   1)
+        self.create_subscription(Image,       '/camera/gripper_camera/depth/image_rect_raw', self._depth_cb,   1)
+        self.create_subscription(CameraInfo,  '/camera/gripper_camera/color/camera_info',    self._caminfo_cb, 1)
+        self.create_subscription(PoseStamped, '/arm/tcp_pose',                               self._tcp_cb,     1)
 
         self.cli_move_l    = self.create_client(MoveLinear, '/arm/move_l')
         self.cli_move_safe = self.create_client(Trigger, '/arm/move_safe')
         self.cli_open      = self.create_client(Trigger, '/gripper/open')
+        self.cli_teach     = self.create_client(Trigger, '/arm/teach_mode')
 
     def _color_cb(self, msg):
         self.color_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
@@ -141,6 +142,56 @@ class HalfRunNode(Node):
     def open_gripper(self):
         self._call(self.cli_open, Trigger.Request())
 
+    def disable_teach_mode(self):
+        if not self.cli_teach.wait_for_service(timeout_sec=2.0):
+            self.get_logger().warn('teach_mode service not available — skipping')
+            return
+        resp = self._call(self.cli_teach, Trigger.Request())
+        msg = resp.message.lower()
+        if 'enabled' in msg:
+            # We just turned it ON — call again to turn it back OFF
+            resp = self._call(self.cli_teach, Trigger.Request())
+        print(f'  Teach mode: {resp.message}')
+
+
+_SAM3_PYTHON = os.path.expanduser('~/sam3_env/bin/python3')
+_SAM3_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'sam3_infer.py')
+
+
+def detect_object_sam3_socket(image_rgb, query, sock_path='/tmp/sam3.sock'):
+    import base64, socket as _socket, tempfile, json as _json
+    tmp_path = tempfile.mktemp(suffix='.jpg')
+    cv2.imwrite(tmp_path, cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
+    try:
+        with _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM) as s:
+            s.connect(sock_path)
+            s.sendall((_json.dumps({'image': tmp_path, 'query': query}) + '\n').encode())
+            response = b''
+            while True:
+                chunk = s.recv(65536)
+                if not chunk:
+                    break
+                response += chunk
+        data = _json.loads(response.decode().strip())
+        if 'error' in data:
+            raise RuntimeError(data['error'])
+        boxes  = np.array(data['boxes'],  dtype=float)
+        scores = np.array(data['scores'], dtype=float)
+        labels = np.array([query] * len(scores))
+        mask = None
+        if data.get('mask_b64') and len(boxes) > 0:
+            raw  = base64.b64decode(data['mask_b64'])
+            h, w = data['mask_shape']
+            mask = np.frombuffer(raw, dtype=np.uint8).reshape(h, w).astype(bool)
+            best = int(np.argmax(scores))
+            print(f'  SAM3 mask: {mask.sum()} pixels  score={scores[best]:.3f}')
+        return boxes, labels, scores, mask
+    except Exception as e:
+        print(f'  [WARN] SAM3 socket failed: {e}')
+        return np.zeros((0, 4)), np.array([]), np.array([]), None
+    finally:
+        os.unlink(tmp_path)
+
 
 def detect_object_gemini(image_rgb, query, api_key):
     import re
@@ -169,6 +220,7 @@ def detect_object_gemini(image_rgb, query, api_key):
 
 
 def identify_object(image_rgb, api_key):
+    import re as _re
     _, buf = cv2.imencode('.jpg', cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
@@ -179,7 +231,11 @@ def identify_object(image_rgb, api_key):
             'Reply with only the object name, 2-4 words maximum, no punctuation.',
         ],
     )
-    return response.text.strip().lower()
+    raw = response.text.strip()
+    # Gemini 2.5 leaks chain-of-thought — actual answer is always the last short phrase
+    m = _re.search(r'[.!?\n]\s*([^\n.!?]{2,40})\s*$', raw)
+    name = (m.group(1).strip() if m else raw.split('\n')[-1].strip()).lower()
+    return ' '.join(name.split()[:4])
 
 
 def main():
@@ -187,10 +243,15 @@ def main():
     parser.add_argument('--object', default=None, help='Object to grasp (Gemini identifies if omitted)')
     parser.add_argument('--approach-height', type=float, default=0.10, metavar='M')
     parser.add_argument('--grasp-offset',    type=float, default=0.02,  metavar='M')
+    parser.add_argument('--dry-run', action='store_true', help='Detect and compute poses only — do not move arm')
+    parser.add_argument('--detector', default='sam3', choices=['sam3', 'gemini'],
+                        help='Detection backend (default: sam3)')
+    parser.add_argument('--socket', nargs='?', const='/tmp/sam3.sock', metavar='PATH',
+                        help='SAM3 socket path (default: /tmp/sam3.sock)')
     args = parser.parse_args()
 
     api_key = os.environ.get('GEMINI_API_KEY', '')
-    if not api_key:
+    if not api_key and args.detector == 'gemini':
         print('ERROR: GEMINI_API_KEY not set.')
         sys.exit(1)
 
@@ -209,34 +270,60 @@ def main():
     caminfo = node.camera_info
     tcp     = node.tcp_matrix.copy()
 
+
     # Auto-identify object
     if args.object is None:
-        print('Auto-identifying object...')
+        print('No --object specified. Asking Gemini to identify the object...')
         args.object = identify_object(color, api_key)
-        print(f'  Detected: "{args.object}"')
+        print(f'  Detected object: "{args.object}"')
 
-    # Detect
-    print(f'Detecting "{args.object}" with Gemini...')
-    boxes, labels, scores = detect_object_gemini(color, args.object, api_key)
+    # Detect with SAM3 socket (default) or Gemini
+    sock = args.socket if args.socket else ('/tmp/sam3.sock' if args.detector == 'sam3' else None)
+    if args.detector == 'sam3' and sock:
+        print(f'Running SAM3 (socket ~1s) for "{args.object}"...')
+        boxes, labels, scores, seg_mask = detect_object_sam3_socket(color, args.object, sock_path=sock)
+    elif args.detector == 'sam3':
+        print(f'Running SAM3 (cold ~12s) for "{args.object}"...')
+        boxes, labels, scores, seg_mask = detect_object_sam3_socket(color, args.object)
+    else:
+        print(f'Detecting "{args.object}" with Gemini...')
+        boxes, labels, scores = detect_object_gemini(color, args.object, api_key)
+        seg_mask = None
+
     if len(boxes) == 0:
         print(f'ERROR: "{args.object}" not found in image.')
         node.destroy_node(); rclpy.shutdown(); sys.exit(1)
 
     best = int(np.argmax(scores))
     x1, y1, x2, y2 = [int(v) for v in boxes[best]]
-    u, v_px = (x1 + x2) // 2, (y1 + y2) // 2
 
-    # 3D position
-    k_mat = caminfo.k
-    fx, fy, cx, cy = k_mat[0], k_mat[4], k_mat[2], k_mat[5]
-    pad = 5
-    roi = depth[max(0, v_px-pad):v_px+pad, max(0, u-pad):u+pad].astype(float)
-    valid = roi[roi > 0]
+    # Use mask centroid if available, otherwise box centre — exactly as test_dryrun_analyze.py
+    if seg_mask is not None and seg_mask.any():
+        ys, xs = np.where(seg_mask)
+        u, v_px = int(xs.mean()), int(ys.mean())
+    else:
+        u, v_px = (x1 + x2) // 2, (y1 + y2) // 2
+
+    print(f'  Best detection: "{labels[best]}"  score={scores[best]:.3f}')
+    print(f'  Centroid pixel: ({u}, {v_px})' + (' (mask centroid)' if seg_mask is not None else ''))
+
+    # Depth — use SAM3 mask pixels when available, else centroid patch
+    if seg_mask is not None and seg_mask.any():
+        valid = depth[seg_mask].astype(float)
+        valid = valid[valid > 0]
+        print(f'  Using SAM3 mask depth ({len(valid)} pixels)')
+    else:
+        pad = 5
+        roi = depth[max(0, v_px-pad):v_px+pad, max(0, u-pad):u+pad].astype(float)
+        valid = roi[roi > 0]
     if len(valid) == 0:
         print('ERROR: no valid depth at detection centroid.')
         node.destroy_node(); rclpy.shutdown(); sys.exit(1)
+
     depth_m = float(np.median(valid)) / 1000.0
-    p_cam   = np.array([(u-cx)*depth_m/fx, (v_px-cy)*depth_m/fy, depth_m])
+    fx, fy  = caminfo.k[0], caminfo.k[4]
+    cx, cy  = caminfo.k[2], caminfo.k[5]
+    p_cam   = np.array([(u - cx) * depth_m / fx, (v_px - cy) * depth_m / fy, depth_m])
     T       = tcp @ _TCP_TO_CAM
     p_world = (T @ np.array([*p_cam, 1.0]))[:3]
 
@@ -269,28 +356,36 @@ def main():
 
     print(f'\nApproach TCP z={approach[2,3]:.3f} m')
     print(f'Grasp    TCP z={grasp[2,3]:.3f} m')
-    print('\nGripper open → moving to approach → moving to grasp → retreating.')
+
+    if args.dry_run:
+        print('\nDRY RUN — poses look good. Re-run without --dry-run to move the arm.')
+        node.destroy_node(); rclpy.shutdown(); return
+
+    print('\nGripper open → approach → grasp pose → back to start.')
     print('NO GRIPPER CLOSE. Ctrl-C at any point to abort.')
 
     # Execute
+    print('\nDisabling teach mode...')
+    node.disable_teach_mode()
+
     node.open_gripper()
     time.sleep(0.3)
 
     print('\nMoving to approach pose...')
     node.move_l(approach, speed=0.15, accel=0.3)
     print(f'  At approach. Fingertip ~{approach_fz:.3f} m above table.')
-    time.sleep(1.0)   # pause so user can inspect
+    time.sleep(1.0)
 
     print('Descending to grasp pose (gripper stays open)...')
     node.move_l(grasp, speed=0.05, accel=0.1)
     print(f'  At grasp. Fingertip ~{grasp_fz:.3f} m. Inspect position now.')
-    time.sleep(2.0)   # pause for inspection
+    time.sleep(2.0)
 
     print('Retreating to approach height...')
     node.move_l(approach, speed=0.10, accel=0.2)
 
-    print('Returning to safe position...')
-    node.move_safe()
+    print('Returning to starting position...')
+    node.move_l(tcp, speed=0.15, accel=0.3)
 
     print('\nHalf-run complete — positions verified. Run full pipeline when ready.')
     node.destroy_node()

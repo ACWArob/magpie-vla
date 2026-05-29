@@ -1605,3 +1605,238 @@ The Magpie gripper fingers are driven by a **parallelogram 4-bar linkage** (a = 
   Grasp:    0.085 m  (need ≥ 0.055)  ✓ SAFE
 =========================
 ```
+
+---
+
+## Day 6B — 2026-05-28: Half-Run, Full Grasp Pipeline, PCA Wrist Rotation
+
+### D6B-1: RTDE Stale Connection — Diagnosis and Fix
+
+**Problem:** After `ur5_node` had been running for 753+ minutes (since 2026-05-27), `move_l` service calls returned `success=True` and the node logged `MoveL to xyz=[...]`, but the physical arm did not move. No error was thrown.
+
+**Root cause:** The RTDE control script on the UR5 controller stops responding after very long uptime. The `ur5.py` wrapper calls `rtde_control.moveL()` and does not check the return value — so the call silently fails. The node's TCP state topic still publishes correctly (read interface is a separate RTDE connection) which masked the issue.
+
+**Diagnosis steps:**
+1. Ran `test_move_up.py` — arm did not move despite `success=True`
+2. Confirmed RTDE was connected: tried to open a second `RTDEControlInterface` → got `RTDE input registers already in use`
+3. Confirmed node was alive since May 27: `ps aux | grep ur5_node` showed >750 min uptime
+
+**Fix:**
+```bash
+# Find PIDs
+ps aux | grep ur5_node
+
+# Hard kill both the launcher and the node process
+kill -9 <pid1> <pid2>
+
+# Restart
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+ros2 run magpie_control ur5_node
+```
+
+**Rule going forward:** If `move_l` returns success but arm does not move, restart `ur5_node` before any other debugging. The RTDE connection does not self-recover.
+
+---
+
+### D6B-2: `test_move_up.py` — Minimal Arm Connection Verifier
+
+Created `scripts/test_move_up.py` as a minimal single-purpose diagnostic. Moves the arm N cm up (or down) from its current position at 2 cm/s using MoveLinear. Used to verify RTDE connection is alive before running longer pipelines.
+
+**Usage:**
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 ~/magpie_control/scripts/test_move_up.py        # move up 4 cm (default)
+python3 ~/magpie_control/scripts/test_move_up.py 10     # move up 10 cm
+python3 ~/magpie_control/scripts/test_move_up.py -5     # move down 5 cm
+```
+
+**Expected output:**
+```
+Disabling teach mode...
+  Teach mode: Teach mode disabled
+Getting current pose...
+  Current TCP: x=-0.203  y=-0.512  z=0.403
+  Target  TCP: x=-0.203  y=-0.512  z=0.443
+Moving up 4 cm at 2 cm/s...
+  Result: success=True  message="..."
+```
+
+If arm does not physically move despite `success=True` → restart `ur5_node` (see D6B-1).
+
+---
+
+### D6B-3: `test_halfrun.py` — Approach-and-Hold Without Closing
+
+Created `scripts/test_halfrun.py` to physically verify arm positioning before committing to a real grasp. The arm moves to approach height, descends to grasp position (gripper stays open), holds for 2 seconds so the operator can inspect the position, retreats to approach height, then returns to its original TCP pose.
+
+**Key design decisions:**
+
+**Teach mode toggle detection:** `/arm/teach_mode` is a Trigger that **toggles** freedrive — calling it when already OFF accidentally re-enables it, causing the next move to fail with "Teach mode active". Fix: check `resp.message` for the word `"enabled"` — if present, call the service a second time to toggle back OFF.
+
+**Depth from SAM3 mask pixels:** Uses `depth[seg_mask]` median — samples depth at all mask pixels, discards zeros, takes median. Identical to `test_dryrun_analyze.py`. This avoids the color/depth sensor parallax problem: the RealSense D405 has a ~15 mm baseline between depth and color sensors; at 0.5 m distance this causes a ~30–75 pixel parallax shift. Sampling a small centroid patch in the color image gives floor-level depth readings. Sampling the entire SAM3 mask ensures enough pixels land on the actual object in the unregistered depth image.
+
+**Return to starting pose:** Captures `tcp = node.tcp_matrix.copy()` at startup. After the approach/hold sequence, `move_l(tcp)` returns to that exact pose — not `move_safe` which executes a joint-space move to a preset configuration and can cause unexpected large rotations if the arm is far from that config.
+
+**Usage:**
+```bash
+export GEMINI_API_KEY=your_key
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+
+# SAM3 socket detector (default — start socket server first)
+~/sam3_env/bin/python3 ~/magpie_control/scripts/sam3_infer.py --socket &
+python3 ~/magpie_control/scripts/test_halfrun.py --object "red block" --socket --grasp-offset 0.01
+
+# Dry-run only (poses computed, arm does not move)
+python3 ~/magpie_control/scripts/test_halfrun.py --object "red block" --socket --grasp-offset 0.01 --dry-run
+```
+
+**CLI flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--object` | (Gemini auto-identify) | Object name for SAM3 detection and descriptor |
+| `--detector` | `sam3` | Detection backend: `sam3` or `gemini` |
+| `--socket` | `/tmp/sam3.sock` | SAM3 socket path (server must be running) |
+| `--grasp-offset` | 0.02 m | How far below object surface fingertip targets |
+| `--approach-height` | 0.10 m | Hover height above object before descending |
+| `--dry-run` | off | Compute poses only, do not move arm |
+
+**Verified result (2026-05-28, red block at z=0.071 m, `--grasp-offset 0.01`):**
+- Approach: fingertip 0.171 m, TCP z=0.402 m ✓
+- Grasp: fingertip 0.061 m, TCP z=0.292 m ✓ (arc drop 21 mm → effective 0.040 m > 0.030 floor)
+- Arm physically moved to approach, descended, held 2 s, returned to start
+
+---
+
+### D6B-4: `test_fullrun.py` — Full Autonomous Grasp Pipeline
+
+Created `scripts/test_fullrun.py`. This is the complete grasp: detect → plan → approach → PCA rotate → descend → close gripper → lift → return → release. All detection and planning happen before the arm moves; the arm sequence is committed only after the safety check passes.
+
+**Pipeline in order:**
+
+1. **Wait for sensor data** — color, depth, camera_info, TCP pose (10 s timeout)
+2. **Auto-identify object** — if `--object` omitted, sends one camera frame to Gemini 2.5 Flash ("What is the main graspable object? 2–4 words."). Gemini 2.5 leaks chain-of-thought into `response.text`; fix: `re.search(r'[.!?\n]\s*([^\n.!?]{2,40})\s*$', raw)` extracts only the final phrase.
+3. **Parallel: SAM3 + Gemini DeliGrasp descriptor** — `ThreadPoolExecutor(max_workers=2)`. SAM3 via socket (~1 s), descriptor via Gemini text-only (~3 s). Both run concurrently; total latency = max(~1, ~3) = ~3 s.
+4. **Depth from SAM3 mask** — `depth[seg_mask]` median / 1000.0. Same as dryrun_analyze.
+5. **3D world position** — back-project via color intrinsics, transform with `tcp @ _TCP_TO_CAM`.
+6. **Safety check** — approach_fz and grasp_eff_z (after arc drop using descriptor `aperture_mm`) vs `HARD_FLOOR_Z = 0.030`. Hard abort if either fails.
+7. **Disable teach mode** — toggle-aware (see D6B-3).
+8. **Open gripper.**
+9. **Move to approach** (15 cm/s, 0.3 m/s²).
+10. **PCA rotation** — re-detect at approach height with SAM3 socket. Build world-frame point cloud from mask + depth using `pointcloud_utils.build_segmented_pcd`. PCA via `analyse_pcd` → `grasp_angle_deg`. Fold to [−90°, 90°] (parallel gripper is symmetric at 180°). If elongation ratio (major/minor extent) < 1.5, skip rotation — PCA axes are unreliable for square or circular objects. If elongated, apply `grasp_rotation_matrix(angle)` and execute `move_l(approach)` in place to rotate the wrist before descending.
+11. **Descend to grasp** (5 cm/s, 0.1 m/s²).
+12. **Set force + close** — `set_force(initial_force)` sets motor torque limit persistently; `close()` Trigger drives gripper until contact at that limit. Wait 2.5 s for motor to finish closing (low forces like 0.8 N close slowly). `--min-force` overrides the descriptor's computed force.
+13. **Lift to approach height** (5 cm/s — slow to hold grasp stable).
+14. **Return to starting TCP** (15 cm/s).
+15. **Open gripper** — release object.
+
+**DeliGrasp action not used:** The gripper_node's `deligrasp_execute_callback` is `async def` but is called from a synchronous ROS2 spin context with no asyncio event loop — results in `RuntimeError: no running event loop`. Fell back to synchronous `set_force` + `close` Trigger services which work correctly. Force limit from the descriptor is still applied; slip-detection (additional_closure/additional_force) is not.
+
+**Usage:**
+```bash
+export GEMINI_API_KEY=your_key
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+
+# Auto-identify + grasp
+python3 ~/magpie_control/scripts/test_fullrun.py --socket --grasp-offset 0.01
+
+# Specify object + stronger force floor
+python3 ~/magpie_control/scripts/test_fullrun.py --object "tape measure" --socket \
+  --grasp-offset 0.02 --min-force 7.0
+
+# Dry-run (no motion)
+python3 ~/magpie_control/scripts/test_fullrun.py --socket --grasp-offset 0.01 --dry-run
+```
+
+**CLI flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--object` | (Gemini auto-identify) | Object name |
+| `--socket` | `/tmp/sam3.sock` | SAM3 socket path |
+| `--grasp-offset` | 0.02 m | Fingertip descent below object surface |
+| `--approach-height` | 0.10 m | Hover height above object |
+| `--min-force` | 0.0 N | Minimum gripper force (overrides descriptor if higher) |
+| `--dry-run` | off | Poses only, no motion |
+
+**Object-specific parameters verified (2026-05-28):**
+
+| Object | `--grasp-offset` | `--min-force` | Notes |
+|---|---|---|---|
+| Red block (~38 mm, z≈0.072 m) | 0.01 m | 0 (descriptor ~0.8–2.5 N sufficient) | Successful grasp + lift |
+| Tape measure (round, z≈0.080 m) | 0.02 m | 7.0 N | Curved surface needs higher force; descriptor ~3.5 N not enough |
+| Pink cube | 0.01 m | 0 | Nearly square → PCA skipped |
+
+---
+
+### D6B-5: Gemini 2.5 Chain-of-Thought Leakage
+
+**Problem:** Gemini 2.5 Flash has thinking enabled by default and leaks its reasoning into `response.text`. A request for "What is the main graspable object? 2–4 words." returned a multi-paragraph chain-of-thought ending with `red cube`. The entire string was used as the SAM3 query, causing SAM3 to fail to find `"thought\n1. **analyze the request:**..."`.
+
+**Fix applied in both `test_fullrun.py` and `test_halfrun.py`:**
+```python
+raw = resp.text.strip()
+m = re.search(r'[.!?\n]\s*([^\n.!?]{2,40})\s*$', raw)
+name = (m.group(1).strip() if m else raw.split('\n')[-1].strip()).lower()
+name = ' '.join(name.split()[:4])   # cap at 4 words
+```
+
+The regex extracts the last short phrase after the final sentence-ending punctuation or newline — that is always the actual answer. The 4-word cap prevents edge cases where the regex captures a slightly longer phrase.
+
+---
+
+### D6B-6: PCA Wrist Rotation — Design and Limitations
+
+**What it does:** After the arm reaches approach height, a fresh SAM3 detection provides a mask taken directly from above the object. `pointcloud_utils.build_segmented_pcd` back-projects all mask pixels to world-frame XYZ using the current TCP matrix. PCA on those points gives the major axis of the object's footprint. `grasp_rotation_matrix(angle)` rotates the wrist so the fingers grip across the short axis (maximum contact).
+
+**Angle folding:** `grasp_angle_deg` from `analyse_pcd` is in [0°, 180°). Since the gripper fingers are symmetric, rotating by θ and θ+180° produce identical grasps. Fold to [−90°, 90°]:
+```python
+angle = result['grasp_angle_deg'] % 180
+if angle > 90:
+    angle -= 180
+```
+This prevents the wrist from rotating more than 90° from default, avoiding cable strain.
+
+**Square/circular object guard:** If `major_extent / minor_extent < 1.5`, the two PCA axes have similar variance — the computed angle is dominated by noise. Rotation is skipped with a printed message. Threshold 1.5 was chosen empirically: the red block (5.7 × 4.9 cm, ratio 1.2) and pink cube (5.4 × 5.6 cm, ratio 1.0) correctly skip; an elongated object like a tape measure or screwdriver (ratio > 2) correctly applies rotation.
+
+**Verified (2026-05-28):**
+- Red block: extent 5.7 × 4.9 cm, elongation 1.2× → skipped ✓
+- Pink cube: extent 5.4 × 5.6 cm, elongation 1.0× → skipped ✓
+- Tape measure: elongation ~3× → rotation applied ✓
+
+---
+
+### D6B-7: VSCode Pylance Import Resolution
+
+All ROS2 and workspace Python packages (rclpy, cv_bridge, geometry_msgs, sensor_msgs, std_srvs, magpie_msgs, magpie_control) produced `reportMissingImports` errors in the IDE. These are false positives — packages are installed but outside Python's standard path.
+
+**Fix:** Created `.vscode/settings.json` in the project root with `python.analysis.extraPaths`:
+
+```json
+{
+    "python.analysis.extraPaths": [
+        "/opt/ros/humble/local/lib/python3.10/dist-packages",
+        "/opt/ros/humble/lib/python3.10/site-packages",
+        "/home/user/ws_ctrl/install/magpie_msgs/local/lib/python3.10/dist-packages",
+        "/home/user/Downloads/May_14/magpie_control-main/src"
+    ]
+}
+```
+
+If errors persist after saving: **Ctrl+Shift+P → Python: Restart Language Server**.
+
+#### New Files (2026-05-28)
+
+| File | Description |
+|---|---|
+| `scripts/test_halfrun.py` | Move to approach + grasp position, hold, return — no gripper close |
+| `scripts/test_move_up.py` | Move arm N cm up/down — RTDE connection verifier |
+| `scripts/test_fullrun.py` | Full autonomous grasp: detect → PCA rotate → descend → close → lift → release |
+| `.vscode/settings.json` | Pylance extraPaths for ROS2 + workspace packages |
+
+#### Changed Files (2026-05-28)
+
+| File | Change |
+|---|---|
+| `scripts/test_halfrun.py` | Added Gemini chain-of-thought leakage fix in `identify_object()` |
+| `scripts/test_dryrun_analyze.py` | No changes (reference implementation, left as-is) |
