@@ -1840,3 +1840,114 @@ If errors persist after saving: **Ctrl+Shift+P → Python: Restart Language Serv
 |---|---|
 | `scripts/test_halfrun.py` | Added Gemini chain-of-thought leakage fix in `identify_object()` |
 | `scripts/test_dryrun_analyze.py` | No changes (reference implementation, left as-is) |
+
+---
+
+## Day 7 — 2026-05-29: Adaptive Slip Detection (`test_fullrun_slip.py`)
+
+### D7-1: Motivation — Completing DeliGrasp
+
+`test_fullrun.py` uses the Gemini DeliGrasp descriptor to compute grasp parameters but applies them with a one-shot close: `set_force(initial_force)` → `close()` → `sleep(4s)`. The gripper_node's `/gripper/deligrasp` action server implements real adaptive slip detection (close → check load → tighten if slip → repeat) but its callback is `async def` and requires an asyncio event loop that does not exist in the synchronous `rclpy.spin_until_future_complete` context — calling it results in `RuntimeError: no running event loop`.
+
+The fix: implement the adaptive loop at the script level using the existing synchronous services (`/gripper/set_force`, `/gripper/close`, `/gripper/set_position`) and the `/gripper/state` topic, which publishes measured aperture and force at 10 Hz.
+
+---
+
+### D7-2: New File — `scripts/test_fullrun_slip.py`
+
+Copy of `test_fullrun.py` with the gripper close section replaced by `adaptive_grasp()`. Everything else (auto-identify, SAM3+descriptor parallel, PCA rotation, safety check) is identical.
+
+**`adaptive_grasp()` — how it works:**
+
+```
+1. Compute CLOSE_FORCE_N = max(initial_force, 5.0)
+   — initial_force is the holding force (physics minimum to not drop the object).
+   — The Dynamixel motor needs at least ~5 N to overcome its own mechanism friction
+     and physically move the gripper. For lightweight objects, initial_force can be
+     < 1 N, which prevents the motor from closing at all.
+   — These two forces are intentionally decoupled.
+
+2. set_force(CLOSE_FORCE_N) → close_gripper()
+   — Drives the fingers to contact.
+
+3. read_gripper_state(settle_sec=3.5)
+   — Waits 3.5 s for the motor to finish, then spins 8 × spin_once to flush the
+     /gripper/state topic queue and get a fresh snapshot.
+
+4. slip = state.force < initial_force × 0.4
+   — Contact threshold: measured force must reach 40% of the target holding force.
+   — If force is near 0 N, the gripper closed fully without touching anything (object
+     slipped through, wasn't there, or aperture too wide).
+
+5. If contact confirmed → done. If slip detected:
+   — current_force += add_force (from Gemini descriptor)
+   — Retry (up to --slip-retries, default 3)
+
+6. On final retry failure → force a full close_gripper() as fallback.
+```
+
+**Key design point — why `close_gripper()` not `set_position(goal_ap_mm)`:**
+
+`set_position(40mm)` stops the fingers at 40 mm. If the block is 38 mm wide, the fingers stop 2 mm short of contact. `close_gripper()` drives to contact regardless of the object's actual width — the motor stalls when it meets resistance, giving contact detection via the load reading.
+
+**Key bug fixed during iteration (D7-3):**
+
+The first version called `set_force(initial_force)` before `close_gripper()`. For a 75–150 g object, `initial_force` is typically 1–3 N. The Dynamixel's torque limit at 2.94 N is insufficient to move the gripper mechanism against its own friction — the gripper stayed stuck at 90.6 mm (fully open) on every attempt despite the service returning `success: True`. The fix is `CLOSE_FORCE_N = max(initial_force, 5.0)`.
+
+**New CLI flag:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--slip-retries` | 3 | Maximum tighten retries if slip detected |
+
+All flags from `test_fullrun.py` (`--object`, `--socket`, `--grasp-offset`, `--approach-height`, `--min-force`, `--dry-run`) are identical.
+
+**Usage:**
+```bash
+export GEMINI_API_KEY=your_key
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+
+python3 scripts/test_fullrun_slip.py --object "red block" --socket --grasp-offset 0.01
+```
+
+---
+
+### D7-3: Iteration Log — Debugging Gripper Not Closing
+
+Three bugs were encountered and fixed during testing before the script worked:
+
+**Bug 1 — `set_force(initial_force)` before `close_gripper()`:**
+
+`state.force = 0.000 N` and `state.position = 90.6 mm` on every attempt. Gemini returned `initial_force = 2.943 N` for the red block. The Dynamixel `set_force()` sets the motor torque limit via the N→load polynomial — at 2.94 N, the load limit is low enough that the motor cannot overcome mechanism friction, and the gripper barely moves. Fix: `CLOSE_FORCE_N = max(initial_force, 5.0)` — always use at least 5 N for the mechanical close.
+
+**Bug 2 — `set_position(goal_ap_mm)` instead of `close_gripper()`:**
+
+An intermediate version used `set_position(goal_ap_mm)` (e.g. 40 mm) to move to the Gemini target aperture. This stops the fingers at 40 mm even if the block is slightly narrower — no contact. The retries then decremented by 1.5 mm per attempt (40 → 38.5 → 37 → ...) but with `CLOSE_FORCE_N = 5.0 N` still not applied consistently. Fix: always use `close_gripper()` which drives to contact.
+
+**Bug 3 — Gripper node stale (motor not responding):**
+
+After repeated tests and service calls, the gripper node entered a state where open/close/calibrate all returned `success: True` but the position never changed (stuck at 90.6 mm, `temperature: 0.0`). Temperature = 0.0 means the node was no longer communicating with hardware. Fix: kill gripper_node PIDs and restart. After restart, `gripper/state` showed `temperature: 32.5°C` and the gripper moved correctly.
+
+**Diagnostic rule:** If `/gripper/state` shows `temperature: 0.0`, the node is not talking to hardware. Kill and restart gripper_node.
+
+---
+
+### D7-4: Verified Result (2026-05-29, red block)
+
+```
+Adaptive grasp: initial_force=1.051 N  close_force=5.0 N  add_force=0.225 N  closure=1.5 mm  max_retries=3
+Contact threshold: 0.420 N
+Attempt 1: force=5.000 N
+  → aperture=29.9 mm  measured_force=2.366 N  threshold=0.420 N
+Contact confirmed — grip secure at 2.366 N
+```
+
+- Gripper closed from 103.6 mm to 29.9 mm (Gemini predicted 30 mm goal aperture — accurate)
+- Measured force 2.366 N well above threshold 0.420 N — no retries needed
+- Object lifted and returned successfully
+
+#### New Files (2026-05-29)
+
+| File | Description |
+|---|---|
+| `scripts/test_fullrun_slip.py` | Full grasp pipeline with adaptive slip detection via `/gripper/state` topic |

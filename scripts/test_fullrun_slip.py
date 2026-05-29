@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 """
-Full grasp pipeline: detect object, compute grip params, move arm, close gripper.
+Full grasp pipeline with adaptive slip detection.
+
+Same as test_fullrun.py but replaces the one-shot gripper close with a
+DeliGrasp-style adaptive loop:
+  1. Close at initial_force (from Gemini descriptor)
+  2. Wait for motor to settle
+  3. Read /gripper/state — check measured force
+  4. If force < contact threshold → slip detected → increase force + squeeze
+     tighter by closure_mm → retry (up to --slip-retries times)
 
 Steps:
   1. Wait for camera + TCP pose
   2. SAM3 detection + Gemini DeliGrasp descriptor (parallel)
-  3. Safety check (uses descriptor aperture for accurate arc drop)
-  4. Open gripper → approach → descend → close with force control → lift → return → release
+  3. Safety check
+  4. Open → approach → PCA rotate → descend → adaptive close → lift → return → release
 
 Usage:
     export GEMINI_API_KEY=your_key
     source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
-    python3 scripts/test_fullrun.py --object "red block" --socket --grasp-offset 0.01
+    python3 scripts/test_fullrun_slip.py --object "red block" --socket --grasp-offset 0.01
 """
 
 import argparse
@@ -35,10 +43,14 @@ from google.genai import types
 from magpie_control import poses
 from magpie_control.homog_utils import homog_xform, R_krot
 from magpie_control.gripper_arc import fingertip_drop as _gripper_drop
-from magpie_msgs.srv import MoveLinear, SetGripperForce
+from magpie_msgs.msg import GripperState
+from magpie_msgs.srv import MoveLinear, SetGripperForce, SetGripperPosition
 
 GRIPPER_LENGTH = 0.231   # m  wrist flange → fingertip (open gripper)
 HARD_FLOOR_Z   = 0.030   # m  physical table surface
+
+# Slip threshold: if measured force is below this fraction of set force → slip
+_SLIP_FORCE_RATIO = 0.4
 
 _TCP_TO_CAM = homog_xform(
     rotnMatx=R_krot([0.0, 0.0, 1.0], -np.pi / 2.0),
@@ -118,25 +130,28 @@ def _matrix_to_pose_msg(matrix):
     return msg
 
 
-class FullRunNode(Node):
+class FullRunSlipNode(Node):
     def __init__(self):
-        super().__init__('fullrun')
+        super().__init__('fullrun_slip')
         self.bridge = CvBridge()
-        self.color_image = None
-        self.depth_image = None
-        self.camera_info = None
-        self.tcp_matrix  = None
+        self.color_image  = None
+        self.depth_image  = None
+        self.camera_info  = None
+        self.tcp_matrix   = None
+        self.gripper_state = None  # latest GripperState msg
 
-        self.create_subscription(Image,       '/camera/gripper_camera/color/image_raw',      self._color_cb,   1)
-        self.create_subscription(Image,       '/camera/gripper_camera/depth/image_rect_raw', self._depth_cb,   1)
-        self.create_subscription(CameraInfo,  '/camera/gripper_camera/color/camera_info',    self._caminfo_cb, 1)
-        self.create_subscription(PoseStamped, '/arm/tcp_pose',                               self._tcp_cb,     1)
+        self.create_subscription(Image,        '/camera/gripper_camera/color/image_raw',      self._color_cb,   1)
+        self.create_subscription(Image,        '/camera/gripper_camera/depth/image_rect_raw', self._depth_cb,   1)
+        self.create_subscription(CameraInfo,   '/camera/gripper_camera/color/camera_info',    self._caminfo_cb, 1)
+        self.create_subscription(PoseStamped,  '/arm/tcp_pose',                               self._tcp_cb,     1)
+        self.create_subscription(GripperState, '/gripper/state',                              self._gripper_state_cb, 1)
 
-        self.cli_move_l = self.create_client(MoveLinear,    '/arm/move_l')
-        self.cli_teach  = self.create_client(Trigger,        '/arm/teach_mode')
-        self.cli_open   = self.create_client(Trigger,        '/gripper/open')
-        self.cli_close  = self.create_client(Trigger,        '/gripper/close')
-        self.cli_force  = self.create_client(SetGripperForce, '/gripper/set_force')
+        self.cli_move_l  = self.create_client(MoveLinear,         '/arm/move_l')
+        self.cli_teach   = self.create_client(Trigger,             '/arm/teach_mode')
+        self.cli_open    = self.create_client(Trigger,             '/gripper/open')
+        self.cli_close   = self.create_client(Trigger,             '/gripper/close')
+        self.cli_force   = self.create_client(SetGripperForce,     '/gripper/set_force')
+        self.cli_set_pos = self.create_client(SetGripperPosition,  '/gripper/set_position')
 
     def _color_cb(self, msg):
         self.color_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='rgb8')
@@ -150,6 +165,8 @@ class FullRunNode(Node):
         self.tcp_matrix = poses.pose_vec_to_mtrx([
             p.position.x, p.position.y, p.position.z, rv[0], rv[1], rv[2]
         ])
+    def _gripper_state_cb(self, msg):
+        self.gripper_state = msg
 
     def wait_for_data(self, timeout=10.0):
         t = time.time()
@@ -193,6 +210,20 @@ class FullRunNode(Node):
         resp = self._call(self.cli_force, req)
         print(f'  Force limit: {force_n:.3f} N  ({resp.message})')
 
+    def set_position(self, pos_mm):
+        req = SetGripperPosition.Request()
+        req.position = float(max(0.0, pos_mm))
+        resp = self._call(self.cli_set_pos, req)
+        print(f'  Set position: {pos_mm:.1f} mm → actual {resp.actual_position:.1f} mm')
+
+    def read_gripper_state(self, settle_sec=3.5):
+        """Wait for motor to settle then return a fresh GripperState snapshot."""
+        time.sleep(settle_sec)
+        # Spin a few times to flush queued state messages and get a fresh one
+        for _ in range(8):
+            rclpy.spin_once(self, timeout_sec=0.15)
+        return self.gripper_state
+
     def disable_teach_mode(self):
         if not self.cli_teach.wait_for_service(timeout_sec=2.0):
             self.get_logger().warn('teach_mode service not available — skipping')
@@ -202,6 +233,80 @@ class FullRunNode(Node):
         if 'enabled' in msg:
             resp = self._call(self.cli_teach, Trigger.Request())
         print(f'  Teach mode: {resp.message}')
+
+
+def adaptive_grasp(node, gp, min_force, max_retries=3):
+    """
+    DeliGrasp-style adaptive close loop.
+
+    Mirrors Gripper.deligrasp() / check_slip() over ROS services + topic:
+
+      - Move fingers to goal_aperture (Gemini descriptor) at CLOSE_FORCE_N
+      - Read /gripper/state after settle
+      - slip = state.force < initial_force * _SLIP_FORCE_RATIO
+      - on slip: close tighter by closure_mm, increase force by add_force, retry
+
+    Key distinction: initial_force is the *holding* force (physics minimum to
+    not drop the object). CLOSE_FORCE_N is the *movement* force (minimum for
+    the Dynamixel to overcome its own friction — may be much higher for light
+    objects). These are decoupled so delicate objects get a gentle hold but
+    the gripper can still physically close.
+
+    Returns the final force used.
+    """
+    if gp is not None:
+        initial_force = max(float(gp['initial_force']), min_force)
+        add_force     = float(gp['add_force'])
+        closure_mm    = float(gp['closure_mm'])
+        goal_ap_mm    = float(gp['aperture_mm'])
+    else:
+        initial_force = max(0.5, min_force)
+        add_force     = 0.5
+        closure_mm    = 2.0
+        goal_ap_mm    = 0.0
+
+    # Motor needs at least ~5 N to overcome mechanism friction and actually move.
+    # initial_force (holding force) may be much lower for lightweight objects.
+    CLOSE_FORCE_N = max(initial_force, 5.0)
+
+    # Slip threshold: measured force must exceed this after settling
+    contact_threshold = max(0.15, initial_force * _SLIP_FORCE_RATIO)
+
+    current_force = CLOSE_FORCE_N
+
+    print(f'  Adaptive grasp: initial_force={initial_force:.3f} N  '
+          f'close_force={CLOSE_FORCE_N:.1f} N  add_force={add_force:.3f} N  '
+          f'closure={closure_mm:.1f} mm  max_retries={max_retries}')
+    print(f'  Contact threshold: {contact_threshold:.3f} N')
+
+    for attempt in range(max_retries + 1):
+        print(f'  Attempt {attempt+1}: force={current_force:.3f} N')
+        node.set_force(current_force)
+        node.close_gripper()
+        state = node.read_gripper_state(settle_sec=3.5)
+
+        if state is None:
+            print('  [WARN] No gripper state — assuming contact')
+            break
+
+        measured = state.force
+        aperture = state.position
+        print(f'    aperture={aperture:.1f} mm  measured_force={measured:.3f} N  '
+              f'threshold={contact_threshold:.3f} N')
+
+        if measured >= contact_threshold:
+            print(f'  Contact confirmed — grip secure at {measured:.3f} N')
+            break
+
+        if attempt == max_retries:
+            print(f'  [WARN] Max retries reached — proceeding with current grip')
+            break
+
+        # Slip detected — increase force and close again
+        print(f'  Slip detected — increasing force and re-closing')
+        current_force = min(16.0, current_force + add_force)
+
+    return current_force
 
 
 _SAM3_PYTHON = os.path.expanduser('~/sam3_env/bin/python3')
@@ -255,79 +360,6 @@ def _depth_at(depth, seg_mask, u, v_px):
     return float(np.median(valid)) / 1000.0 if len(valid) > 0 else None
 
 
-def center_over_object(node, object_name, sock_path, approach, grasp,
-                       max_iters=4, pixel_thresh=20):
-    """
-    At approach height, iteratively correct arm XY so the object is centred in
-    the camera frame. Keeps TCP Z and orientation unchanged.
-
-    Returns (approach, grasp, final_seg_mask, final_depth, final_tcp).
-    final_seg_mask/depth/tcp are from the last detection — used for PCA rotation.
-    """
-    print(f'  Centering (max {max_iters} iters, threshold {pixel_thresh} px)...')
-    final_seg_mask = None
-    final_depth    = None
-    final_tcp      = None
-
-    for i in range(max_iters):
-        rclpy.spin_once(node, timeout_sec=0.4)
-        color = node.color_image.copy()
-        depth = node.depth_image.copy()
-        tcp   = node.tcp_matrix.copy()
-
-        boxes, labels, scores, seg_mask = detect_object_sam3_socket(color, object_name, sock_path)
-        if len(boxes) == 0:
-            print(f'    iter {i+1}: object not found — keeping current pose')
-            break
-
-        best = int(np.argmax(scores))
-        if seg_mask is not None and seg_mask.any():
-            ys, xs = np.where(seg_mask)
-            u, v_px = int(xs.mean()), int(ys.mean())
-        else:
-            x1, y1, x2, y2 = [int(v) for v in boxes[best]]
-            u, v_px = (x1 + x2) // 2, (y1 + y2) // 2
-
-        final_seg_mask = seg_mask
-        final_depth    = depth
-        final_tcp      = tcp
-
-        cx_img, cy_img = node.camera_info.k[2], node.camera_info.k[5]
-        pixel_err = float(np.hypot(u - cx_img, v_px - cy_img))
-        print(f'    iter {i+1}: centroid=({u},{v_px})  error={pixel_err:.0f} px', end='')
-
-        if pixel_err < pixel_thresh:
-            print('  ✓ centred')
-            break
-
-        # Compute new world XY and shift approach + grasp
-        depth_m = _depth_at(depth, seg_mask, u, v_px)
-        if depth_m is None:
-            print('  no depth — stopping')
-            break
-
-        fx, fy = node.camera_info.k[0], node.camera_info.k[4]
-        p_cam   = np.array([(u - cx_img) * depth_m / fx,
-                             (v_px - cy_img) * depth_m / fy,
-                             depth_m])
-        T       = tcp @ _TCP_TO_CAM
-        p_world = (T @ np.array([*p_cam, 1.0]))[:3]
-
-        # Clamp step to 3 cm to prevent wild jumps from bad detections
-        dx = np.clip(p_world[0] - approach[0, 3], -0.03, 0.03)
-        dy = np.clip(p_world[1] - approach[1, 3], -0.03, 0.03)
-        approach[0, 3] += dx
-        approach[1, 3] += dy
-        grasp[0, 3]     = approach[0, 3]
-        grasp[1, 3]     = approach[1, 3]
-        print(f'  → shift ({dx*100:+.1f}, {dy*100:+.1f}) cm  '
-              f'new XY=({approach[0,3]:.3f}, {approach[1,3]:.3f})')
-        node.move_l(approach, speed=0.08, accel=0.15)
-        time.sleep(0.4)
-
-    return approach, grasp, final_seg_mask, final_depth, final_tcp
-
-
 def call_descriptor(object_name, api_key):
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(
@@ -377,6 +409,8 @@ def main():
                         help='SAM3 socket path (default: /tmp/sam3.sock)')
     parser.add_argument('--min-force', type=float, default=0.0, metavar='N',
                         help='Override minimum gripper force in Newtons (0 = use descriptor)')
+    parser.add_argument('--slip-retries', type=int, default=3, metavar='N',
+                        help='Max adaptive tighten retries on slip detection (default: 3)')
     parser.add_argument('--dry-run', action='store_true',
                         help='Detect and compute poses only — do not move arm or gripper')
     args = parser.parse_args()
@@ -387,7 +421,7 @@ def main():
         sys.exit(1)
 
     rclpy.init()
-    node = FullRunNode()
+    node = FullRunSlipNode()
 
     print('Waiting for sensor data...')
     if not node.wait_for_data(timeout=10.0):
@@ -414,10 +448,10 @@ def main():
             ],
         )
         raw = resp.text.strip()
-        # Gemini 2.5 leaks chain-of-thought — actual answer is always the last short phrase
+        # Gemini 2.5 leaks chain-of-thought — actual answer is last short phrase
         m = re.search(r'[.!?\n]\s*([^\n.!?]{2,40})\s*$', raw)
         args.object = (m.group(1).strip() if m else raw.split('\n')[-1].strip()).lower()
-        args.object = ' '.join(args.object.split()[:4])  # cap at 4 words
+        args.object = ' '.join(args.object.split()[:4])
         print(f'  Detected object: "{args.object}"')
 
     sock = args.socket if args.socket else '/tmp/sam3.sock'
@@ -515,7 +549,7 @@ def main():
     grasp = approach.copy()
     grasp[2, 3] = p_world[2] - args.grasp_offset + GRIPPER_LENGTH
 
-    # Safety check — use descriptor aperture if available, worst-case (0mm) otherwise
+    # Safety check
     approach_fz = p_world[2] + args.approach_height
     grasp_fz    = p_world[2] - args.grasp_offset
     goal_ap_mm  = float(gp['aperture_mm']) if gp else 0.0
@@ -539,7 +573,7 @@ def main():
         print('\nDRY RUN — poses look good. Re-run without --dry-run to execute grasp.')
         node.destroy_node(); rclpy.shutdown(); return
 
-    print('\nExecuting full grasp. Ctrl-C at any point to abort.')
+    print('\nExecuting full grasp with slip detection. Ctrl-C at any point to abort.')
 
     print('\nDisabling teach mode...')
     node.disable_teach_mode()
@@ -553,7 +587,7 @@ def main():
     print(f'  At approach. Fingertip ~{approach_fz:.3f} m above table.')
     time.sleep(0.5)
 
-    # Re-detect at approach height for a cleaner PCA view of the object
+    # PCA rotation at approach height
     print('Getting PCA rotation from approach height...')
     rclpy.spin_once(node, timeout_sec=0.4)
     pca_color = node.color_image.copy()
@@ -575,7 +609,6 @@ def main():
                 extent     = result['extent_m']
                 elongation = extent[0] / max(extent[1], 1e-6)
 
-                # Fold to [-90, 90] — parallel gripper is symmetric
                 angle = result['grasp_angle_deg'] % 180
                 if angle > 90:
                     angle -= 180
@@ -604,14 +637,10 @@ def main():
     print(f'  At grasp. Fingertip ~{grasp_fz:.3f} m.')
     time.sleep(0.5)
 
-    print('Closing gripper...')
-    if gp is not None:
-        force = max(gp['initial_force'], args.min_force)
-        node.set_force(force)
-    elif args.min_force > 0:
-        node.set_force(args.min_force)
-    node.close_gripper()
-    time.sleep(4)   # gripper motor needs time to finish closing at low force
+    # Adaptive grasp with slip detection
+    print('\nAdaptive grasp (slip detection)...')
+    final_force = adaptive_grasp(node, gp, args.min_force, max_retries=args.slip_retries)
+    print(f'  Grasp complete. Final force: {final_force:.3f} N')
 
     print('\nLifting to approach height...')
     node.move_l(approach, speed=0.05, accel=0.1)
@@ -623,7 +652,7 @@ def main():
     print('Releasing object...')
     node.open_gripper()
 
-    print('\nFull grasp complete.')
+    print('\nFull grasp with slip detection complete.')
     node.destroy_node()
     rclpy.shutdown()
 

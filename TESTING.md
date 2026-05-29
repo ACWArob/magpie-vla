@@ -1152,3 +1152,151 @@ Full grasp complete.
 | Centering loop sends arm wrong direction | World XY recomputation equals approach XY (no delta) | Already fixed — centering removed, PCA re-detect used instead |
 
 **Note on DeliGrasp action:** The `/gripper/deligrasp` action server's callback is `async def` and requires an asyncio event loop that is not present in a synchronous `rclpy.spin_until_future_complete` context. Sending a goal results in `RuntimeError: no running event loop` inside the gripper_node. The workaround — `set_force` (sets motor torque limit persistently) followed by `close` Trigger — applies the descriptor's `initial_force` and closes until contact. Slip detection (`additional_closure`, `additional_force`) is not active with this approach.
+
+---
+
+## Stage 10 — Adaptive Slip Detection (2026-05-29)
+
+Full grasp pipeline with DeliGrasp-style adaptive slip detection implemented at the script level via `/gripper/state` topic feedback. Identical to Stage 9 except the one-shot gripper close is replaced by an iterative tighten loop.
+
+**Hardware required:** Same as Stage 9 (UR5 + MAGPIE gripper + RealSense + Ethernet). Gripper node must be freshly started — see diagnostics.
+
+**Prerequisites:** Same four nodes as Stage 8/9.
+
+```bash
+export GEMINI_API_KEY=your_key
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+```
+
+---
+
+### Test A — Specify object
+
+```bash
+python3 ~/magpie_control/scripts/test_fullrun_slip.py \
+  --object "red block" --socket --grasp-offset 0.01
+```
+
+### Test B — Auto-identify
+
+```bash
+python3 ~/magpie_control/scripts/test_fullrun_slip.py --socket --grasp-offset 0.01
+```
+
+### Test C — Dry-run
+
+```bash
+python3 ~/magpie_control/scripts/test_fullrun_slip.py --socket --grasp-offset 0.01 --dry-run
+```
+
+---
+
+**What it does (differences from Stage 9):**
+
+Steps 1–10 are identical to Stage 9 (auto-identify, SAM3+descriptor parallel, PCA rotation, safety check, approach, descend). The grasp step is replaced:
+
+**Stage 9 (one-shot):**
+```
+set_force(initial_force) → close() → sleep(4s)
+```
+
+**Stage 10 (adaptive loop):**
+```
+For attempt in [1 .. slip_retries+1]:
+  set_force(CLOSE_FORCE_N)     ← max(initial_force, 5.0) — enough to physically move motor
+  close_gripper()              ← drives to contact
+  sleep(3.5s)                  ← wait for motor to settle
+  read /gripper/state          ← get measured aperture + force
+  if state.force ≥ initial_force × 0.4:
+    → Contact confirmed, grip secure
+  else:
+    → Slip detected — increase force by add_force, retry
+  On final retry: force full close_gripper() as fallback
+```
+
+**Why `CLOSE_FORCE_N = max(initial_force, 5.0)`:** `initial_force` is the physics-minimum holding force (e.g. 1–3 N for a 75–150 g object). The Dynamixel motor needs ≥ 5 N torque limit to overcome its own mechanism friction and physically move. Setting force too low = gripper stuck at 90.6 mm (fully open) despite `close()` returning `success: True`.
+
+**Why `close_gripper()` not `set_position(goal_ap_mm)`:** `set_position(40mm)` stops at 40 mm even if the block is 38 mm — no contact. `close_gripper()` drives to contact regardless of actual object width.
+
+---
+
+**Expected output (slip detection section):**
+```
+Adaptive grasp (slip detection)...
+  Adaptive grasp: initial_force=X.XXX N  close_force=5.0 N  add_force=X.XXX N  closure=X.X mm  max_retries=3
+  Contact threshold: X.XXX N
+  Attempt 1: force=5.000 N
+  Force limit: 5.000 N  (Force limit set to 5.00 N)
+  Gripper: Gripper closed successfully
+    aperture=XX.X mm  measured_force=X.XXX N  threshold=X.XXX N
+  Contact confirmed — grip secure at X.XXX N
+  Grasp complete. Final force: 5.000 N
+```
+
+**If slip detected (force near 0 after close):**
+```
+  Attempt 1: force=5.000 N
+    aperture=90.6 mm  measured_force=0.000 N  threshold=0.420 N
+  Slip detected — increasing force and re-closing
+  Attempt 2: force=5.225 N
+    aperture=XX.X mm  measured_force=X.XXX N  threshold=0.420 N
+  Contact confirmed — grip secure at X.XXX N
+```
+
+---
+
+**Expected results:**
+
+| Check | Expected |
+|---|---|
+| CLOSE_FORCE_N | Printed as `close_force=5.0 N` (or higher if `initial_force > 5`) |
+| Contact threshold | `initial_force × 0.4` — printed before loop |
+| Attempt 1 aperture | Should be ≈ goal aperture (e.g. 30 mm for red block) — confirms gripper closed |
+| Measured force | > threshold → `Contact confirmed` on first attempt for well-placed objects |
+| Retries triggered | If object slips or is not under gripper — force increments and retries |
+| Object lifted | Visually confirm object rises with arm after confirmation |
+
+**Verified result (2026-05-29, red block):**
+
+| Parameter | Value |
+|---|---|
+| Gemini descriptor | mass=75 g, μ=0.70, k=1500 N/m, goal aperture=30.0 mm |
+| initial_force | 1.051 N |
+| CLOSE_FORCE_N | 5.0 N |
+| Contact threshold | 0.420 N |
+| Attempt 1 result | aperture=29.9 mm, force=2.366 N → Contact confirmed |
+| Retries needed | 0 |
+| Outcome | Object lifted and returned successfully ✓ |
+
+---
+
+**CLI flags:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--object` | (Gemini auto-identify) | Object name for SAM3 + descriptor |
+| `--socket` | `/tmp/sam3.sock` | SAM3 socket path |
+| `--grasp-offset` | 0.02 m | Fingertip descent below object surface |
+| `--approach-height` | 0.10 m | Hover height above object |
+| `--min-force` | 0.0 N | Override minimum holding force (raises threshold) |
+| `--slip-retries` | 3 | Max adaptive tighten retries on slip detection |
+| `--dry-run` | off | Poses only, no motion |
+
+---
+
+**Diagnostics:**
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `aperture=90.6 mm  measured_force=0.000 N` on every attempt | `set_force` too low → motor can't move; OR gripper node stale | Check `close_force` is ≥ 5 N in output; if so → restart gripper_node |
+| `temperature: 0.0` in `/gripper/state` | Gripper node lost communication with hardware | Kill and restart gripper_node (`pgrep -a -f gripper_node` → `kill -9 <pids>`) |
+| `aperture=90.6mm` after gripper_node restart | Gripper motors in stale error state from previous session | `ros2 service call /gripper/calibrate std_srvs/srv/Trigger {}` then retry |
+| Slip on every attempt despite object present | Object too slippery or descriptor force too low | Add `--min-force 5.0` (raises `CLOSE_FORCE_N` and threshold) |
+| All other symptoms | Same as Stage 9 | See Stage 9 diagnostics |
+
+**Note on gripper node restart:** After `kill -9`, restart with:
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+ros2 run magpie_control gripper_node
+```
+Wait for `Gripper Node initialized`. Verify: `ros2 topic echo /gripper/state --once` → `temperature` should be 30–40°C (not 0.0).

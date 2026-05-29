@@ -1,22 +1,140 @@
 # magpie_control
-breakout of submodule for ur5 and gripper control using the MAGPIE interface.
 
-# Installation
-To install `magpie_control` in a python environment, run the following commands once your environment is active:
+Autonomous grasping stack for the UR5 + MAGPIE gripper. Integrates ROS2 nodes, SAM3 vision, Gemini DeliGrasp descriptors, and adaptive slip detection into a single pipeline that detects an object by name and grasps it.
+
+---
+
+## What's in this repo
+
+| Component | What it does |
+|---|---|
+| `gripper_node` | ROS2 node — Dynamixel AX-12 finger control, force/position services, 10 Hz state publisher |
+| `ur5_node` | ROS2 node — UR5 RTDE wrapper, MoveLinear / teach-mode services |
+| `ft_sensor_node` | ROS2 node — ATI F/T sensor via `netft_rdt_driver` |
+| `tactile_sensor_node` | ROS2 node — tactile fingertip sensor |
+| `sam3_infer.py` | SAM3 socket server — open-vocabulary segmentation over a Unix socket (subprocess, no ROS) |
+| `pointcloud_utils.py` | Depth → world-frame point cloud, PCA grasp-angle and object-height estimation |
+| `test_halfrun.py` | Detect + describe only (no arm movement) |
+| `test_fullrun.py` | Full grasp pipeline: detect → describe → move → grasp (one-shot force) |
+| `test_fullrun_slip.py` | Full grasp with **adaptive slip detection** — retightens if contact force is insufficient |
+
+---
+
+## Key changes from the original repo
+
+### 1. ROSification — everything is a node
+
+The original repo was a plain Python library. We added:
+
+- **`ur5_node`** wraps `rtde_control` / `rtde_receive` into a proper ROS2 node so the arm can be controlled by any pipeline script via services (`/ur5/move_linear`, `/ur5/disable_teach_mode`, …).
+- **`gripper_node`** already existed; we extended it with `/gripper/set_force` and verified the `/gripper/state` diagnostic flow (`temperature: 0.0` = node not talking to hardware).
+- Camera frames and TCP pose are published as ROS topics so scripts can snapshot them without managing connections directly.
+
+### 2. SAM3 open-vocabulary segmentation
+
+`sam3_infer.py` runs SAM3 (Segment Anything Model 3) in a **separate subprocess** via a Unix socket (`/tmp/sam3.sock`). The main pipeline sends a JPEG + object name and receives back bounding boxes, labels, confidence scores, and a pixel mask. Using a subprocess bridges the SAM3 / transformers environment from the ROS2 Python environment without version conflicts.
+
+- Requires: HuggingFace access token (`HF_TOKEN` env var) and SAM3 model access approved on HuggingFace.
+- Hardware: runs on RTX 2070 (float32 patch applied — bf16 not supported on RTX 20xx).
+- Start the server before running any pipeline script:
+  ```bash
+  python3 scripts/sam3_infer.py
+  ```
+
+### 3. Gemini DeliGrasp descriptor
+
+Before moving the arm, the pipeline calls the Gemini API (`gemini-2.5-flash`) with a structured prompt to produce grasp parameters for the target object:
+
+| Parameter | Meaning |
+|---|---|
+| `mass_g` | Estimated object mass (g) |
+| `mu` | Friction coefficient |
+| `k` | Object stiffness (N/m) |
+| `aperture_mm` | Pre-close finger gap (mm) |
+| `initial_force` | Minimum holding force (N) — physics |
+| `add_force` | Force increment per slip retry (N) |
+| `closure_mm` | Extra closure past contact (mm) |
+
+Set `GEMINI_API_KEY` before running. If no `--object` is given the pipeline asks Gemini to identify the object from the camera image automatically.
+
+### 4. Adaptive slip detection (`test_fullrun_slip.py`)
+
+One-shot force control (as in `test_fullrun.py`) works for known objects but can fail on slippery or unexpectedly heavy items. `test_fullrun_slip.py` adds a retry loop:
+
+1. Set gripper force to `max(initial_force, 5.0)` N (the 5 N floor overcomes Dynamixel mechanism friction).
+2. Close gripper with `/gripper/close` (drives to contact, not a fixed position).
+3. Read `/gripper/state` after a 3.5 s settle time.
+4. If `measured_force < initial_force × 0.4`, declare slip and increment force by `add_force`, then retry.
+5. Repeat up to `--slip-retries` times (default: 3). Cap at 16 N.
+
+The key design insight: **`initial_force` (the holding physics estimate) is decoupled from `CLOSE_FORCE_N` (the movement force)**. A feather-light object might need only 0.5 N to hold but needs ≥ 5 N just to get the fingers moving.
+
+### 5. Auto grasp-offset from PCA
+
+`--grasp-offset` controls how far the fingertips descend below the object surface centroid before closing. Previously this was set manually. Now:
+
+- After the initial detection, the SAM3 mask is back-projected to a world-frame point cloud via `build_segmented_pcd()`.
+- PCA decomposes the cloud into three axes: `extent_m = [major, minor, normal]`.
+- `normal` (index 2) is the smallest axis — the object's vertical height.
+- `auto_offset = clamp(height / 2, 0.005, 0.04)` positions fingertips at the mid-height of the object.
+- Pass `--grasp-offset <m>` explicitly to override.
+
+---
+
+## Quick start — full adaptive grasp
 
 ```bash
-git clone https://github.com/correlllab/magpie_control.git #clone this repository
-cd magpie_control #enter the repo
-pip install . --user #install magpie_control
+# 1. Start ROS2 nodes (three terminals)
+ros2 run magpie_control ur5_node
+ros2 run magpie_control gripper_node
+ros2 run realsense2_camera realsense2_camera_node  # or equivalent camera node
+
+# 2. Start SAM3 server (separate terminal, GPU env)
+python3 scripts/sam3_infer.py
+
+# 3. Run the pipeline
+export GEMINI_API_KEY=your_key_here
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 scripts/test_fullrun_slip.py --object "red block" --socket
 ```
 
-Test out the functionality!
+### CLI flags
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--object TEXT` | auto-detect | Object name sent to SAM3 and Gemini |
+| `--socket [PATH]` | `/tmp/sam3.sock` | Use SAM3 socket server |
+| `--grasp-offset M` | auto (PCA) | Fingertip descent below centroid (m) |
+| `--approach-height M` | `0.10` | Height above object for approach pose (m) |
+| `--min-force N` | `0.0` | Override minimum holding force (N) |
+| `--slip-retries N` | `3` | Max adaptive retighten attempts |
+| `--dry-run` | off | Detect + compute poses only, no movement |
+
+### Dry run (safe to test any time)
 
 ```bash
-python3.10
-import magpie_control
-
+python3 scripts/test_fullrun_slip.py --object "red block" --socket --dry-run
 ```
+
+---
+
+## Installation
+
+```bash
+git clone https://github.com/correlllab/magpie_control.git
+cd magpie_control
+pip install . --user
+```
+
+Build ROS2 packages:
+
+```bash
+cd ~/ws_ctrl
+colcon build --packages-select magpie_msgs magpie_control
+source install/setup.bash
+```
+
+---
 
 ## ROS2 Gripper Node: Run and Control
 
@@ -123,12 +241,6 @@ ros2 topic echo /gripper/state
 
 All gripper aperture/position values are in **millimeters (mm)**.
 
-#### Node executable
-
-```bash
-ros2 run magpie_control gripper_node
-```
-
 #### Startup parameters
 
 - `auto_detect_port` (bool, default: `true`): auto-discover Dynamixel serial device.
@@ -136,17 +248,6 @@ ros2 run magpie_control gripper_node
 - `use_eflesh` (bool, default: `false`): enable eflesh sensor initialization.
 - `default_speed` (int, default: `100`): initial Dynamixel moving speed setting.
 - `default_torque` (int, default: `200`): initial Dynamixel torque limit.
-
-Example startup with parameters:
-
-```bash
-ros2 run magpie_control gripper_node --ros-args \
-	-p auto_detect_port:=false \
-	-p port:=/dev/ttyUSB0 \
-	-p use_eflesh:=false \
-	-p default_speed:=120 \
-	-p default_torque:=220
-```
 
 #### Published topic
 
@@ -157,7 +258,7 @@ ros2 run magpie_control gripper_node --ros-args \
 	- `position` (mm)
 	- `finger_positions` (mm, `[right, left]`)
 	- `force` (N)
-	- `temperature` (C)
+	- `temperature` (°C) — **`0.0` means the node has lost hardware contact; restart the node**
 	- `is_moving` (bool)
 	- `contact_detected` (bool)
 
@@ -219,6 +320,8 @@ rm -rf build/magpie_control install/magpie_control log
 colcon build --packages-select magpie_control
 source install/setup.bash
 ```
+
+---
 
 ## Bring Up Fresh Dynamixel Motors
 
