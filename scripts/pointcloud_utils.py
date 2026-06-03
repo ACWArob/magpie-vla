@@ -57,11 +57,23 @@ def build_segmented_pcd(mask, depth_mm, caminfo_k, tcp_matrix, tcp_to_cam):
     return pts_world, pcd
 
 
-def denoise_pcd(pcd, nb_neighbors=20, std_ratio=2.0):
-    """Remove statistical outliers. Returns cleaned PointCloud and numpy points."""
+def denoise_pcd(pcd, nb_neighbors=30, std_ratio=0.5):
+    """Remove statistical outliers then keep only the largest DBSCAN cluster.
+    Returns cleaned PointCloud and numpy points."""
+    import open3d as o3d
+
     cleaned, _ = pcd.remove_statistical_outlier(
         nb_neighbors=nb_neighbors, std_ratio=std_ratio
     )
+
+    # Keep only the largest connected cluster — removes stray gripper/cable points
+    # that survive statistical filtering but form their own dense cluster.
+    labels = np.array(cleaned.cluster_dbscan(eps=0.012, min_points=5))
+    if labels.max() >= 0:
+        counts = np.bincount(labels[labels >= 0])
+        largest = int(np.argmax(counts))
+        cleaned = cleaned.select_by_index(np.where(labels == largest)[0])
+
     return cleaned, np.asarray(cleaned.points)
 
 
@@ -161,6 +173,86 @@ def get_full_pose(pcd_or_points):
     tmat[:3, 3] = [mean[1], -mean[0], mean[2]]
 
     return tmat
+
+
+def smart_grasp_angle(pca_result, object_name='', image_rgb=None,
+                      gemini_client=None, gemini_model='gemini-2.5-flash'):
+    """
+    Compute the best grasp angle using shape geometry + optional Gemini classification.
+
+    Three strategies:
+      symmetric  — cube/ball/cylinder: any angle works → 0°
+      short_side — rectangle/book: grip perpendicular to long axis → PCA angle (default)
+      long_side  — pen/banana: grip parallel to long axis → PCA angle + 90°
+
+    Steps:
+      1. Geometry rule: if major/minor < 1.3 → symmetric
+      2. Gemini override: if client + image provided, classify shape for complex objects
+
+    Returns (angle_deg, strategy, reason).
+    """
+    import cv2, base64, tempfile, os
+
+    major = pca_result['extent_m'][0]
+    minor = pca_result['extent_m'][1]
+    ratio = major / max(minor, 1e-6)
+    pca_angle = pca_result['grasp_angle_deg']
+
+    # ── 1. Geometry default ───────────────────────────────────────────────────
+    if ratio < 1.3:
+        strategy = 'symmetric'
+        reason   = f'geometry: ratio={ratio:.2f} < 1.3 (cube/cylinder)'
+    else:
+        strategy = 'short_side'
+        reason   = f'geometry: ratio={ratio:.2f} (rectangle)'
+
+    # ── 2. Gemini override ────────────────────────────────────────────────────
+    if gemini_client is not None and image_rgb is not None and object_name:
+        try:
+            from google.genai import types as gtypes
+            tmp = tempfile.mktemp(suffix='.jpg')
+            cv2.imwrite(tmp, cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
+            with open(tmp, 'rb') as fh:
+                img_bytes = fh.read()
+            os.unlink(tmp)
+
+            prompt = (
+                f'Object: "{object_name}"\n'
+                f'Point cloud extents: major={major*1000:.0f}mm, minor={minor*1000:.0f}mm '
+                f'(ratio={ratio:.2f})\n\n'
+                f'Choose the best gripper strategy — reply with EXACTLY one word:\n'
+                f'  symmetric  — shape is round/square, any angle works (cube, ball, cylinder, bottle cap)\n'
+                f'  short_side — grip perpendicular to longest dimension (box, book, phone, brick)\n'
+                f'  long_side  — grip parallel to longest dimension (pen, banana, screwdriver, remote)\n'
+            )
+            r = gemini_client.models.generate_content(
+                model=gemini_model,
+                contents=[
+                    gtypes.Part.from_bytes(data=img_bytes, mime_type='image/jpeg'),
+                    prompt,
+                ])
+            word = r.text.strip().lower().split()[0]
+            if word in ('symmetric', 'short_side', 'long_side'):
+                reason = f'gemini: {word} (ratio={ratio:.2f})'
+                strategy = word
+        except Exception as e:
+            reason += f' [gemini failed: {e}]'
+
+    # ── 3. Apply strategy ─────────────────────────────────────────────────────
+    # pca_angle already has +90° built in (analyse_pcd adds π/2 to major axis angle).
+    # Empirically: pca_angle grips the SHORT faces; pca_angle+90° grips the LONG faces.
+    if strategy in ('symmetric', 'short_side'):
+        angle = (pca_angle + 90.) % 180.
+    else:  # long_side
+        angle = pca_angle
+
+    angle = float(angle) % 90.   # wrist limit: 0-90° covers all orientations
+
+    # Symmetric shapes have no preferred PCA direction — snap to 0° for consistency
+    if strategy == 'symmetric':
+        angle = 0.0
+
+    return angle, strategy, reason
 
 
 def grasp_rotation_matrix(grasp_angle_deg):
