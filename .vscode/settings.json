@@ -16,9 +16,5 @@
         "/home/user/Downloads/May_14/magpie_control-main/src",
         "/home/user/.local/lib/python3.10/site-packages",
         "/home/user/magpie_control/scripts"
-    ],
-    "python.analysis.diagnosticSeverityOverrides": {
-        "reportMissingImports": "none",
-        "reportUndefinedVariable": "none"
-    }
+    ]
 }

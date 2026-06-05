@@ -1951,3 +1951,184 @@ Contact confirmed — grip secure at 2.366 N
 | File | Description |
 |---|---|
 | `scripts/test_fullrun_slip.py` | Full grasp pipeline with adaptive slip detection via `/gripper/state` topic |
+
+---
+
+## Day 8 — 2026-06-04/05: Perception, Grasp Intelligence & Sweep Validation
+
+### D8-1: pointcloud_utils.py — Full Rewrite
+
+All point-cloud logic moved out of notebooks into `scripts/pointcloud_utils.py`. Functions:
+
+| Function | Purpose |
+|---|---|
+| `build_segmented_pcd(mask, depth_mm, caminfo_k, tcp_matrix, tcp_to_cam)` | Back-projects SAM3 mask pixels → world-frame XYZ using TCP extrinsic |
+| `denoise_pcd(pcd, nb_neighbors=30, std_ratio=0.5)` | Statistical outlier removal (open3d) |
+| `top_layer(pts, percentile=50)` | Keeps top 50% of Z values — strips cutting-mat grid layer from PCA angle computation |
+| `check_view_quality(pts_cleaned, mask, depth_mm)` | Validates depth fill fraction and point count — detects blocked/obstructed views |
+| `mask_grasp_angle(mask)` | 2D image-space PCA on SAM3 mask — robust fallback when depth is unreliable (IR-opaque surfaces, cutting-mat interference) |
+| `analyse_pcd(pcd_or_points)` | 3D PCA on world-frame point cloud — returns centroid, axes, extents, grasp angle |
+| `smart_grasp_angle(pca, object_name, image_rgb, gemini_client, mask)` | Two-layer angle decision: geometry ratio → strategy; Gemini image classification override |
+| `grasp_rotation_matrix(angle_deg)` | Converts grasp angle to wrist rotation matrix |
+
+**Key design decisions:**
+
+- `top_layer` is used **only for angle (PCA)**. Object position (`p_obj`) is always computed from the full depth centroid independently. This separates angle accuracy (needs clean object surface) from position accuracy (needs the actual depth at object centre).
+- `denoise_pcd` reverted to simple statistical removal after DBSCAN variants picked up gripper cables or failed on IR-opaque objects.
+
+---
+
+### D8-2: Smart Grasp Angle — Two-Layer Strategy
+
+`smart_grasp_angle()` classifies objects into one of three strategies:
+
+| Strategy | Condition | Wrist angle |
+|---|---|---|
+| `symmetric` | ratio < 1.3, or extent < 25 mm | 0° (fingers close along any axis) |
+| `short_side` | rectangle, grip across short axis | `pca_angle + 90°` |
+| `long_side` | elongated (pen, screwdriver) | `pca_angle` |
+
+**Layer 1 — Geometry:** PCA major/minor extent ratio. If ratio < 1.3 → symmetric. If major < 25 mm (point cloud unreliable) → symmetric.
+
+**Layer 2 — Gemini override:** If a `gemini_client` is provided, sends the RGB image + object name to Gemini 2.5 Flash with a structured prompt. Gemini returns one of `symmetric / short_side / long_side`. Gemini result overrides geometry if confidence is clear.
+
+All angles clamped to `% 90°` to respect wrist cable-wrap limit.
+
+---
+
+### D8-3: DeliGrasp — Image-Based Material Assessment
+
+Previous approach sent only a text description to Gemini. Updated approach sends the actual camera image alongside the description so Gemini can see the object's material, surface finish, and condition directly. This improves accuracy of `mass_g`, `k` (stiffness), `mu` (friction), `initial_force`, and `aperture_mm`.
+
+**Force policy (physics-based):**
+
+```
+F_min       = (mass_g / 1000 * 9.81) / (2 * mu)   # minimum hold force
+force_cap   = k / 1000                              # stiffness ceiling (N)
+close_force = clip(max(initial_force, F_min * 1.2, 5.0), 5.0, force_cap)
+slip_thresh = clip(F_min * 0.9, 0.15, force_cap * 0.8)
+```
+
+`k` (stiffness in N/m from DeliGrasp) is used as the force ceiling — a high-k object can tolerate more force without damage, a low-k object (foam, bread) gets a low cap.
+
+**Deficit-based escalation on slip:**
+```
+deficit = max(0, slip_thresh - measured_force)
+cf = min(force_cap, cf + max(add_force, deficit + 0.5))
+```
+
+---
+
+### D8-4: TABLE_Z Measurement
+
+TABLE_Z (world-frame Z of the table surface) is measured from depth pixels in a dilated ring **adjacent to** the SAM3 mask (not inside it). This gives the actual table height without needing a separate calibration step.
+
+```python
+dilated  = cv2.dilate(mask.astype(uint8), np.ones((30,30)))
+tbl_mask = dilated.astype(bool) & ~mask
+tbl_dm   = median(depth[tbl_mask][depth[tbl_mask] > 0]) / 1000.
+TABLE_Z  = (T @ [tu, tv, tbl_dm, 1])[:3][2]   # world Z of table
+```
+
+Object height estimate: `obj_height = p_obj[2] - TABLE_Z`. Grasp offset: `obj_height / 2` clamped to 10–40 mm so the gripper grips the object's midpoint rather than its top.
+
+---
+
+### D8-5: _TCP_TO_CAM Calibration Fix
+
+The camera extrinsic was set with the wrong rotation sign, causing the arm to move in the wrong XY direction when approaching detected objects.
+
+**Diagnosis:** TCP rotation matrix showed `[[1,0,0],[0,-1,0],[0,0,-1]]` — wrist flipped from calibration expectation.
+
+**Fix:**
+```python
+# Before (wrong)
+_TCP_TO_CAM = homog_xform(R_krot([0, 0, 1], -np.pi/2), [0, 0, 0.120])
+# After (correct)
+_TCP_TO_CAM = homog_xform(R_krot([0, 0, 1], +np.pi/2), [0, 0, 0.120])
+```
+
+Applied to `magpie_demo.ipynb` cell c03 and `angle_sweep.ipynb` cell c02.
+
+---
+
+### D8-6: HARD_FLOOR_Z — Lowered to 25 mm
+
+Safety floor lowered from 30 mm to 25 mm after the arm was falsely blocked from reaching valid grasp positions (`gfz = 0.0296 m` rejected against `HARD_FLOOR_Z = 0.030`). 25 mm is verified safe by the floor-reach test (Section 13).
+
+---
+
+### D8-7: Dual-Scan Point Cloud (magpie_demo cell c09)
+
+Cell c09 performs two scans and merges them:
+
+1. **Scan 1** — from current arm position (angled side view): captures object profile
+2. **Scan 2** — arm moves directly above the object at approach height (top-down): captures object footprint cleanly
+
+Both scans pass through `check_view_quality`. If both are OK, points are merged with `np.vstack`. If one is blocked, the other is used alone. Merging improves PCA angle robustness and reduces IR-structured-light stripe artifacts.
+
+---
+
+### D8-8: Post-Lift Grasp Validation
+
+After lifting, the grasp is validated on two independent criteria:
+
+```python
+force_ok    = s_lift.force    >= slip_thresh
+aperture_ok = s_lift.position >= obj_w_mm * 0.4  # fingers haven't passed through object
+held        = force_ok and aperture_ok
+```
+
+`aperture_ok` catches the case where the arm lifts but the object slipped through (force may read non-zero due to mechanism friction even without contact).
+
+Up to 6 grasp attempts with deficit-based force escalation before declaring failure.
+
+---
+
+### D8-9: Floor Reach Test (magpie_demo Section 13)
+
+Descends 3 mm at a time from home to `HARD_FLOOR_Z + GRIPPER_LEN` (the lowest TCP position used in any real grasp). All steps must succeed — if any fail, `HARD_FLOOR_Z` must be raised.
+
+Replaces the separate `floor_test.ipynb` notebook which had kernel-sharing issues with `magpie_demo`. Section 13 runs in the same kernel so all config variables (`HARD_FLOOR_Z`, `GRIPPER_LEN`, `home`) are already defined.
+
+---
+
+### D8-10: angle_sweep.ipynb — Systematic Grasp Angle Validation
+
+New notebook `notebooks/angle_sweep.ipynb` places an object at 10° increments (0°–90°) and measures whether the detected angle matches the placed angle.
+
+**Per-iteration sequence (matched exactly to magpie_demo full pickup cell):**
+
+1. `open_g()` + 1 s sleep — gripper fully open before any arm movement
+2. Move to view_pose (straight-down, 5 cm above home) — snapshot + Gemini auto-detect + SAM3
+3. `open_g()` + 0.5 s — second open before approach
+4. Approach → PCA rotate → descend (exact demo timings: 0.08/0.05/0.05 m/s)
+5. Force calc (DeliGrasp or defaults), `set_pos(pre_ap)` + 0.8 s
+6. Attempt loop (up to 6, deficit-based escalation)
+7. Lift → post-lift validation → place at `place_angle` or release
+
+Summary table and plots (expected vs detected angle, force per angle, strategy distribution) are generated at the end. Results are auto-appended to `tests/test_log.md`.
+
+---
+
+### D8-11: SAM3 — Gemini Auto-Detect + Close-Up Retry
+
+Object name is no longer hardcoded. Gemini 2.5 Flash receives the camera image and returns a 2–4 word description:
+
+```python
+ACTIVE = gc.models.generate_content(
+    model='gemini-2.5-flash',
+    contents=[image_part, 'What is the main graspable object? Reply 2-4 words only, no punctuation.']
+).text.strip().lower()
+```
+
+If SAM3 returns no detections, the arm moves 2 cm closer and retries (up to 3 times) before skipping.
+
+#### Changed Files (2026-06-04/05)
+
+| File | Change |
+|---|---|
+| `scripts/pointcloud_utils.py` | Full rewrite: `top_layer`, `check_view_quality`, `mask_grasp_angle`, `smart_grasp_angle`, physics force policy |
+| `notebooks/magpie_demo.ipynb` | `_TCP_TO_CAM` sign fix, `HARD_FLOOR_Z` lowered, dual-scan c09, TABLE_Z measurement, DeliGrasp image input, physics force, post-lift validation, Section 13 floor test |
+| `notebooks/angle_sweep.ipynb` | New sweep notebook — execution block matched to demo full pickup cell |
+| `.vscode/settings.json` | Added `scripts/` to `python.analysis.extraPaths` |

@@ -57,24 +57,95 @@ def build_segmented_pcd(mask, depth_mm, caminfo_k, tcp_matrix, tcp_to_cam):
     return pts_world, pcd
 
 
-def denoise_pcd(pcd, nb_neighbors=30, std_ratio=0.5):
-    """Remove statistical outliers then keep only the largest DBSCAN cluster.
-    Returns cleaned PointCloud and numpy points."""
-    import open3d as o3d
-
+def denoise_pcd(pcd, nb_neighbors=30, std_ratio=0.5, hint=None):
+    """Remove statistical outliers. Returns cleaned PointCloud and numpy points."""
     cleaned, _ = pcd.remove_statistical_outlier(
         nb_neighbors=nb_neighbors, std_ratio=std_ratio
     )
-
-    # Keep only the largest connected cluster — removes stray gripper/cable points
-    # that survive statistical filtering but form their own dense cluster.
-    labels = np.array(cleaned.cluster_dbscan(eps=0.012, min_points=5))
-    if labels.max() >= 0:
-        counts = np.bincount(labels[labels >= 0])
-        largest = int(np.argmax(counts))
-        cleaned = cleaned.select_by_index(np.where(labels == largest)[0])
-
     return cleaned, np.asarray(cleaned.points)
+
+
+def check_view_quality(pts_cleaned, mask, depth_mm, min_points=80, min_fill=0.25):
+    """
+    Check whether the camera has a clean view of the object.
+
+    Detects two obstruction modes:
+      1. Too few valid depth pixels inside the SAM3 mask  (edge/cable blocking)
+      2. Too few points surviving denoise  (sparse / noisy scan)
+
+    Args:
+        pts_cleaned: (N, 3) array after denoise_pcd
+        mask:        (H, W) bool SAM3 mask
+        depth_mm:    (H, W) uint16 RealSense depth
+        min_points:  minimum denoised points to be considered usable
+        min_fill:    minimum fraction of mask pixels with valid depth
+
+    Returns dict:
+        ok      bool   — True if view is good
+        reason  str    — human-readable diagnosis
+        n_pts   int    — denoised point count
+        fill    float  — fraction of mask pixels with valid depth
+    """
+    mask_px = int(mask.sum())
+    if mask_px == 0:
+        return dict(ok=False, reason='mask is empty', n_pts=0, fill=0.0)
+
+    valid_depth = (depth_mm[mask] > 0).sum()
+    fill = float(valid_depth) / mask_px
+    n_pts = len(pts_cleaned)
+
+    if fill < min_fill:
+        return dict(ok=False, reason=f'depth fill {fill:.0%} < {min_fill:.0%} — view blocked',
+                    n_pts=n_pts, fill=fill)
+    if n_pts < min_points:
+        return dict(ok=False, reason=f'only {n_pts} pts after denoise — view blocked or object tiny',
+                    n_pts=n_pts, fill=fill)
+
+    return dict(ok=True, reason='ok', n_pts=n_pts, fill=fill)
+
+
+def top_layer(pts, percentile=50):
+    """Return only points in the top Z percentile — strips mat/table layer.
+    Use this before analyse_pcd for angle computation only; keep full pts for position."""
+    if len(pts) == 0:
+        return pts
+    z = pts[:, 2]
+    if z.max() - z.min() < 0.020:
+        return pts   # single layer, no filtering needed
+    return pts[z >= np.percentile(z, percentile)]
+
+
+def mask_grasp_angle(mask):
+    """
+    Compute grasp angle from the 2D SAM3 mask shape (image-space PCA).
+
+    This is more robust than point-cloud PCA when the depth camera produces
+    stripe artifacts (e.g. RealSense IR structured light on flat surfaces).
+    Returns angle_deg in the same convention as analyse_pcd (0–180°).
+
+    Args:
+        mask: (H, W) bool — SAM3 segmentation mask
+
+    Returns:
+        angle_deg: float — PCA major axis angle (0–180°)
+        ratio:     float — major/minor extent ratio
+    """
+    ys, xs = np.where(mask)
+    if len(xs) < 10:
+        return 0.0, 1.0
+    pts2d = np.stack([xs, ys], axis=1).astype(np.float64)
+    mean2d = pts2d.mean(axis=0)
+    cov2d  = np.cov((pts2d - mean2d).T)
+    eigvals, eigvecs = np.linalg.eigh(cov2d)
+    idx = np.argsort(eigvals)[::-1]
+    eigvals, eigvecs = eigvals[idx], eigvecs[:, idx]
+    major_vec = eigvecs[:, 0]   # (dx_img, dy_img)
+    # Image x → world X, image y → world Y (approximate for top-down view)
+    # Negate dy because image Y increases downward, world Y increases away from robot
+    angle_rad = np.arctan2(-major_vec[1], major_vec[0]) + np.pi / 2
+    angle_deg = float(np.degrees(angle_rad) % 180)
+    ratio = float(np.sqrt(eigvals[0] / max(eigvals[1], 1e-9)))
+    return angle_deg, ratio
 
 
 def analyse_pcd(pcd_or_points):
@@ -176,18 +247,20 @@ def get_full_pose(pcd_or_points):
 
 
 def smart_grasp_angle(pca_result, object_name='', image_rgb=None,
-                      gemini_client=None, gemini_model='gemini-2.5-flash'):
+                      gemini_client=None, gemini_model='gemini-2.5-flash',
+                      mask=None):
     """
     Compute the best grasp angle using shape geometry + optional Gemini classification.
 
     Three strategies:
-      symmetric  — cube/ball/cylinder: any angle works → 0°
-      short_side — rectangle/book: grip perpendicular to long axis → PCA angle (default)
-      long_side  — pen/banana: grip parallel to long axis → PCA angle + 90°
+      symmetric  — cube/ball: use mask PCA angle (grips nearest flat face)
+      short_side — rectangle/book: grip perpendicular to long axis
+      long_side  — pen/banana: grip parallel to long axis
 
     Steps:
       1. Geometry rule: if major/minor < 1.3 → symmetric
-      2. Gemini override: if client + image provided, classify shape for complex objects
+      2. Gemini override: classify shape for complex objects
+      3. Angle source: mask 2D PCA (stripe-free) if mask provided, else point cloud PCA
 
     Returns (angle_deg, strategy, reason).
     """
@@ -198,8 +271,20 @@ def smart_grasp_angle(pca_result, object_name='', image_rgb=None,
     ratio = major / max(minor, 1e-6)
     pca_angle = pca_result['grasp_angle_deg']
 
+    # Use mask-based 2D PCA angle when available — avoids IR stripe artifacts
+    if mask is not None:
+        mask_angle, mask_ratio = mask_grasp_angle(mask)
+        pca_angle = mask_angle
+        if ratio < 1.3:
+            ratio = mask_ratio   # also update ratio from cleaner mask data
+
     # ── 1. Geometry default ───────────────────────────────────────────────────
-    if ratio < 1.3:
+    # If extents are too small the point cloud is noise (e.g. IR-opaque object
+    # on a textured mat) — can't trust PCA angle, force symmetric.
+    if major < 0.025:
+        strategy = 'symmetric'
+        reason   = f'geometry: extent too small ({major*1000:.0f}mm) — point cloud unreliable, forcing symmetric'
+    elif ratio < 1.3:
         strategy = 'symmetric'
         reason   = f'geometry: ratio={ratio:.2f} < 1.3 (cube/cylinder)'
     else:
@@ -241,17 +326,14 @@ def smart_grasp_angle(pca_result, object_name='', image_rgb=None,
     # ── 3. Apply strategy ─────────────────────────────────────────────────────
     # pca_angle already has +90° built in (analyse_pcd adds π/2 to major axis angle).
     # Empirically: pca_angle grips the SHORT faces; pca_angle+90° grips the LONG faces.
-    if strategy in ('symmetric', 'short_side'):
-        angle = (pca_angle + 90.) % 180.
-    else:  # long_side
-        angle = pca_angle
-
-    angle = float(angle) % 90.   # wrist limit: 0-90° covers all orientations
-
-    # Symmetric shapes have no preferred PCA direction — snap to 0° for consistency
     if strategy == 'symmetric':
-        angle = 0.0
+        angle = pca_angle   # use PCA even for cubes — grips nearest flat face
+    elif strategy == 'short_side':
+        angle = (pca_angle + 90.) % 180.   # grip across short dim → contact long faces
+    else:  # long_side
+        angle = pca_angle                   # grip across long dim → contact short faces
 
+    angle = float(angle) % 90.   # wrist limit: symmetric jaws so 0-90° covers all orientations
     return angle, strategy, reason
 
 
