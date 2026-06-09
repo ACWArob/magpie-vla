@@ -57,8 +57,57 @@ def build_segmented_pcd(mask, depth_mm, caminfo_k, tcp_matrix, tcp_to_cam):
     return pts_world, pcd
 
 
-def denoise_pcd(pcd, nb_neighbors=30, std_ratio=0.5, hint=None):
-    """Remove statistical outliers. Returns cleaned PointCloud and numpy points."""
+def denoise_pcd(pcd, nb_neighbors=30, std_ratio=0.5, hint=None,
+                max_radius_m=0.12, z_pad_below=0.08, z_pad_above=0.03,
+                bg_pts=None, bg_thresh_m=0.008):
+    """
+    Remove outliers and crop to object region.
+
+    hint (world-frame object centroid XYZ):
+      - XY crop to max_radius_m around hint in horizontal plane.
+      - Z crop to [hint_z - z_pad_below, hint_z + z_pad_above].
+
+    bg_pts (background cloud from measure_table, no object present):
+      - Background subtraction: drop foreground points within bg_thresh_m
+        of any background point. Useful for debugging segmentation quality
+        in a fixed lab setup.
+      - WARNING: do NOT use for VLA training data collection. At inference
+        time the model won't have a background scan — using it creates a
+        distribution shift between training data and deployment observations.
+        The hint-based spatial crop already handles the table-leakage problem
+        without this dependency.
+    """
+    import open3d as o3d
+
+    pts = np.asarray(pcd.points)
+    if hint is not None and len(pts) > 0:
+        h = np.asarray(hint)
+        xy_dist = np.linalg.norm(pts[:, :2] - h[:2], axis=1)
+        z_ok    = (pts[:, 2] >= h[2] - z_pad_below) & (pts[:, 2] <= h[2] + z_pad_above)
+        keep    = (xy_dist < max_radius_m) & z_ok
+        if keep.sum() >= 10:
+            pts = pts[keep]
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts)
+
+    if bg_pts is not None and len(pts) > 0 and len(bg_pts) > 0:
+        # For each foreground point find its nearest background point.
+        # Points close to background are table/environment — discard them.
+        bg_pcd = o3d.geometry.PointCloud()
+        bg_pcd.points = o3d.utility.Vector3dVector(np.asarray(bg_pts))
+        fg_pcd = o3d.geometry.PointCloud()
+        fg_pcd.points = o3d.utility.Vector3dVector(pts)
+        dists = np.asarray(fg_pcd.compute_point_cloud_distance(bg_pcd))
+        novel = dists > bg_thresh_m
+        if novel.sum() >= 10:
+            pts = pts[novel]
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(pts)
+
+    n = len(np.asarray(pcd.points))
+    if n < nb_neighbors + 1:
+        return pcd, np.asarray(pcd.points)
+
     cleaned, _ = pcd.remove_statistical_outlier(
         nb_neighbors=nb_neighbors, std_ratio=std_ratio
     )
@@ -104,14 +153,21 @@ def check_view_quality(pts_cleaned, mask, depth_mm, min_points=80, min_fill=0.25
     return dict(ok=True, reason='ok', n_pts=n_pts, fill=fill)
 
 
-def top_layer(pts, percentile=50):
-    """Return only points in the top Z percentile — strips mat/table layer.
-    Use this before analyse_pcd for angle computation only; keep full pts for position."""
+def top_layer(pts, percentile=70):
+    """Return only points in the top Z percentile — strips residual table layer.
+
+    percentile=70 means keep top 30% by height. After denoise_pcd's spatial crop,
+    the cloud should already be mostly object; this removes any remaining low points
+    (table edge or mat) without over-cropping.
+
+    Falls through if height range < 20mm (flat object — no stratification to remove).
+    """
     if len(pts) == 0:
         return pts
     z = pts[:, 2]
-    if z.max() - z.min() < 0.020:
-        return pts   # single layer, no filtering needed
+    z_range = z.max() - z.min()
+    if z_range < 0.020:
+        return pts   # already a single layer, no filtering needed
     return pts[z >= np.percentile(z, percentile)]
 
 

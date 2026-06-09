@@ -1,120 +1,295 @@
 # magpie_control
 
-Autonomous grasping stack for the UR5 + MAGPIE gripper. Integrates ROS2 nodes, SAM3 vision, Gemini DeliGrasp descriptors, and adaptive slip detection into a single pipeline that detects an object by name and grasps it.
+Autonomous grasping stack for the UR5 + MAGPIE gripper. Detects any object by name, computes a force-controlled grasp using physics-based parameters (DeliGrasp), and adapts in real-time using depth-based slip detection and a persistent grasp memory that improves with each attempt. Logs VLA training data with a Gemini-based grasp quality reward signal.
 
 ---
 
-## What's in this repo
+## Architecture overview
 
-| Component | What it does |
-|---|---|
-| `gripper_node` | ROS2 node — Dynamixel AX-12 finger control, force/position services, 10 Hz state publisher |
-| `ur5_node` | ROS2 node — UR5 RTDE wrapper, MoveLinear / teach-mode services |
-| `ft_sensor_node` | ROS2 node — ATI F/T sensor via `netft_rdt_driver` |
-| `tactile_sensor_node` | ROS2 node — tactile fingertip sensor |
-| `sam3_infer.py` | SAM3 socket server — open-vocabulary segmentation over a Unix socket (subprocess, no ROS) |
-| `pointcloud_utils.py` | Depth → world-frame point cloud, PCA grasp-angle and object-height estimation |
-| `test_halfrun.py` | Detect + describe only (no arm movement) |
-| `test_fullrun.py` | Full grasp pipeline: detect → describe → move → grasp (one-shot force) |
-| `test_fullrun_slip.py` | Full grasp with **adaptive slip detection** — retightens if contact force is insufficient |
-
----
-
-## Key changes from the original repo
-
-### 1. ROSification — everything is a node
-
-The original repo was a plain Python library. We added:
-
-- **`ur5_node`** wraps `rtde_control` / `rtde_receive` into a proper ROS2 node so the arm can be controlled by any pipeline script via services (`/ur5/move_linear`, `/ur5/disable_teach_mode`, …).
-- **`gripper_node`** already existed; we extended it with `/gripper/set_force` and verified the `/gripper/state` diagnostic flow (`temperature: 0.0` = node not talking to hardware).
-- Camera frames and TCP pose are published as ROS topics so scripts can snapshot them without managing connections directly.
-
-### 2. SAM3 open-vocabulary segmentation
-
-`sam3_infer.py` runs SAM3 (Segment Anything Model 3) in a **separate subprocess** via a Unix socket (`/tmp/sam3.sock`). The main pipeline sends a JPEG + object name and receives back bounding boxes, labels, confidence scores, and a pixel mask. Using a subprocess bridges the SAM3 / transformers environment from the ROS2 Python environment without version conflicts.
-
-- Requires: HuggingFace access token (`HF_TOKEN` env var) and SAM3 model access approved on HuggingFace.
-- Hardware: runs on RTX 2070 (float32 patch applied — bf16 not supported on RTX 20xx).
-- Start the server before running any pipeline script:
-  ```bash
-  python3 scripts/sam3_infer.py
-  ```
-
-### 3. Gemini DeliGrasp descriptor
-
-Before moving the arm, the pipeline calls the Gemini API (`gemini-2.5-flash`) with a structured prompt to produce grasp parameters for the target object:
-
-| Parameter | Meaning |
-|---|---|
-| `mass_g` | Estimated object mass (g) |
-| `mu` | Friction coefficient |
-| `k` | Object stiffness (N/m) |
-| `aperture_mm` | Pre-close finger gap (mm) |
-| `initial_force` | Minimum holding force (N) — physics |
-| `add_force` | Force increment per slip retry (N) |
-| `closure_mm` | Extra closure past contact (mm) |
-
-Set `GEMINI_API_KEY` before running. If no `--object` is given the pipeline asks Gemini to identify the object from the camera image automatically.
-
-### 4. Adaptive slip detection (`test_fullrun_slip.py`)
-
-One-shot force control (as in `test_fullrun.py`) works for known objects but can fail on slippery or unexpectedly heavy items. `test_fullrun_slip.py` adds a retry loop:
-
-1. Set gripper force to `max(initial_force, 5.0)` N (the 5 N floor overcomes Dynamixel mechanism friction).
-2. Close gripper with `/gripper/close` (drives to contact, not a fixed position).
-3. Read `/gripper/state` after a 3.5 s settle time.
-4. If `measured_force < initial_force × 0.4`, declare slip and increment force by `add_force`, then retry.
-5. Repeat up to `--slip-retries` times (default: 3). Cap at 16 N.
-
-The key design insight: **`initial_force` (the holding physics estimate) is decoupled from `CLOSE_FORCE_N` (the movement force)**. A feather-light object might need only 0.5 N to hold but needs ≥ 5 N just to get the fingers moving.
-
-### 5. Auto grasp-offset from PCA
-
-`--grasp-offset` controls how far the fingertips descend below the object surface centroid before closing. Previously this was set manually. Now:
-
-- After the initial detection, the SAM3 mask is back-projected to a world-frame point cloud via `build_segmented_pcd()`.
-- PCA decomposes the cloud into three axes: `extent_m = [major, minor, normal]`.
-- `normal` (index 2) is the smallest axis — the object's vertical height.
-- `auto_offset = clamp(height / 2, 0.005, 0.04)` positions fingertips at the mid-height of the object.
-- Pass `--grasp-offset <m>` explicitly to override.
-
----
-
-## Quick start — full adaptive grasp
-
-```bash
-# 1. Start ROS2 nodes (three terminals)
-ros2 run magpie_control ur5_node
-ros2 run magpie_control gripper_node
-ros2 run realsense2_camera realsense2_camera_node  # or equivalent camera node
-
-# 2. Start SAM3 server (separate terminal, GPU env)
-python3 scripts/sam3_infer.py
-
-# 3. Run the pipeline
-export GEMINI_API_KEY=your_key_here
-source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
-python3 scripts/test_fullrun_slip.py --object "red block" --socket
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  magpie_demo.ipynb  (primary interface)                              │
+│                                                                      │
+│  c01  Launch nodes + GraspMemory                                     │
+│  c03  Constants (APPROACH_H, GRIPPER_LEN, TABLE_Z, _TCP_TO_CAM …)   │
+│  c04  MagpieNode ROS client (arm + gripper + slip guard)             │
+│  measure_table  TABLE_Z (run on clear table before placing object)   │
+│  c14  [optional] DeliGrasp manual run + radar chart visualisation    │
+│  17ea9af9  Full pickup — DeliGrasp runs inline automatically         │
+│  vla_logger  Save result + true_force_label + quality placeholder    │
+│  dg_summary  Post-grasp summary + Gemini grasp quality score (0–1)  │
+└──────────────────────────────────────────────────────────────────────┘
+         │                    │                    │
+    ROS2 nodes          scripts/               data/
+  ur5_node             slip_guard_node.py     grasp_log/
+  gripper_node         grasp_memory.py          force_priors.json
+  ft_sensor_node       pointcloud_utils.py      embeddings.npz
+  realsense2           seed_ycb_priors.py        grasps_YYYY-MM-DD.jsonl
+  sam3_infer.py        measure_poll_rates.py     *_pca_plot.jpg
+  slip_guard_node.py   vlm_consistency.py
 ```
 
-### CLI flags
+### Key scripts
 
-| Flag | Default | Meaning |
+| Script | Purpose |
+|---|---|
+| `slip_guard_node.py` | ROS2 node — depth-primary slip detection during lift; re-clamps grip if object drops >1mm |
+| `grasp_memory.py` | Persistent force priors: DINOv2 RAG + Kalman filter — improves predictions across sessions |
+| `pointcloud_utils.py` | Depth→world point cloud, dual-scan merge, spatial crop, PCA grasp angle |
+| `seed_ycb_priors.py` | Pre-populate force priors from YCB dataset (50 objects) so first grasp isn't cold |
+| `measure_poll_rates.py` | Measure actual publish rates for all sensors |
+| `vlm_consistency.py` | Test Gemini stability across N calls (auto-detect, strategy, DeliGrasp params) |
+
+---
+
+## How to run
+
+### Prerequisites — check once per session
+
+```bash
+# Source ROS2 + workspace
+source /opt/ros/humble/setup.bash
+source ~/ws_ctrl/install/setup.bash
+
+# Verify nodes are up
+ros2 topic list | grep -E "gripper|ur5|camera"
+```
+
+If any nodes are missing, re-run **cell c01** in the notebook — it kills and restarts all processes.
+
+---
+
+### Step 1 — Seed grasp memory (once ever, or after clearing data/)
+
+```bash
+cd ~/magpie_control
+python3 scripts/seed_ycb_priors.py
+```
+
+Seeds force priors for 50 common objects (YCB dataset + lab objects). Safe to re-run — skips objects that already have real grasp data.
+
+---
+
+### Step 2 — Open the notebook
+
+```bash
+cd ~/magpie_control
+jupyter notebook notebooks/magpie_demo.ipynb
+```
+
+**Required cells — run in order at the start of every session:**
+
+| Cell | What it does | Must run? |
 |---|---|---|
-| `--object TEXT` | auto-detect | Object name sent to SAM3 and Gemini |
-| `--socket [PATH]` | `/tmp/sam3.sock` | Use SAM3 socket server |
-| `--grasp-offset M` | auto (PCA) | Fingertip descent below centroid (m) |
-| `--approach-height M` | `0.10` | Height above object for approach pose (m) |
-| `--min-force N` | `0.0` | Override minimum holding force (N) |
-| `--slip-retries N` | `3` | Max adaptive retighten attempts |
-| `--dry-run` | off | Detect + compute poses only, no movement |
+| `c01` | Launches all ROS nodes + SAM3 + slip guard + GraspMemory | **Yes** |
+| `c02` | Loads ROS shared libs into kernel | **Yes** |
+| `c03` | Sets constants (APPROACH_H, GRIPPER_LEN, etc.) | **Yes** |
+| `c04` | Creates MagpieNode ROS client | **Yes** |
+| `measure_table` | Measures TABLE_Z — **run on clear table before placing object** | **Yes, before object** |
+| `c14` | DeliGrasp manual run + radar chart — **optional**, useful for inspection | No — runs inline |
 
-### Dry run (safe to test any time)
+---
+
+### Step 3 — Full grasp (main flow)
+
+**Run 17ea9af9 directly — DeliGrasp now runs automatically inside the pickup cell.**
+
+```
+17ea9af9 → Full pickup sequence:
+  1. Gemini auto-detects object name
+  2. SAM3 segments object (with close-up retry)
+  3. Arm moves above object
+  4. Dual scan: detection-pos + top-down → merged point cloud
+  5. PCA → grasp angle + strategy (Gemini override for complex shapes)
+     PCA figure saved to bytes for quality assessment
+  6. Force params: DeliGrasp inline (or skip if memory confident)
+     → k-based deformation cap: force_cap = k * 0.012 (12mm max crush)
+     → reclamp step = k/2000 (soft objects get gentler slip recovery)
+     → GraspMemory prior blended in when n ≥ 2
+  7. Tighten grip to lift_force before rising (avoids marginal grip at lift)
+  8. Lift with slip guard active (depth-primary, 10Hz camera)
+     snap_held captured post-lift for quality assessment
+  9. Controlled place-down: carry to home → lower to table Z → open → rise
+ 10. result dict → vla_logger → dg_summary
+
+vla_logger → Saves to data/grasp_log/grasps_YYYY-MM-DD.jsonl
+              Saves snap_held image + PCA plot as JPG
+              Updates GraspMemory Kalman filter with true_force_label
+              Writes grasp_quality=null placeholder (filled by dg_summary)
+
+dg_summary → Prints force/aperture/strategy/memory state
+              Sends snap_grasp + snap_held + PCA overlay to Gemini
+              Gets grasp_quality 0.0–1.0 + category + reason
+              Patches last JSONL entry with quality score
+```
+
+---
+
+### Step 4 — After 5+ grasps of the same object
+
+The system skips DeliGrasp automatically:
+
+```
+Memory confident (n=7, std=0.31N) — skipping DeliGrasp
+Blended force: 3.8N (memory 70% + GP 30%)
+```
+
+Force prediction improves each run via Kalman update.
+
+---
+
+### Teach mode (move arm by hand)
 
 ```bash
-python3 scripts/test_fullrun_slip.py --object "red block" --socket --dry-run
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+ros2 service call /arm/teach_mode std_srvs/srv/Trigger
+# move arm, then call again to disable
+ros2 service call /arm/teach_mode std_srvs/srv/Trigger
 ```
+
+Or from the notebook: `node.teach()` / `node.unteach()`
+
+---
+
+### Emergency / recovery
+
+```bash
+# Gripper stuck closed (AX-12 overload)
+ros2 service call /gripper/clear_error std_srvs/srv/Trigger
+ros2 service call /gripper/open std_srvs/srv/Trigger
+
+# UR5 RTDE connection dropped ("End of file")
+# → re-run cell c01 in the notebook (kills and restarts ur5_node)
+# → on pendant: ensure external control program is running (play button)
+
+# Slip guard
+ros2 service call /slip_guard/enable std_srvs/srv/Trigger
+ros2 service call /slip_guard/disable std_srvs/srv/Trigger
+ros2 topic echo /slip_guard/events
+```
+
+---
+
+### VLM consistency test
+
+```bash
+# Capture live frame and test N=20 calls
+python3 scripts/vlm_consistency.py --capture --n 20
+
+# Or use a saved image
+python3 scripts/vlm_consistency.py path/to/image.jpg --object "red cube" --n 20
+```
+
+Results saved to `tests/vlm_consistency_YYYY-MM-DD_HHMM.md`.
+
+---
+
+### Sensor poll rates
+
+```bash
+source /opt/ros/humble/setup.bash && source ~/ws_ctrl/install/setup.bash
+python3 scripts/measure_poll_rates.py
+```
+
+Expected: arm 500Hz, gripper 10Hz, camera 10Hz. F/T sensor requires hardware connection on 192.168.0.5:49152.
+
+---
+
+## Grasp memory system
+
+Each grasp updates `data/grasp_log/force_priors.json` (Kalman filter per object) and `data/grasp_log/embeddings.npz` (DINOv2 ViT-S embedding + true_force_label).
+
+At query time:
+1. **Named Kalman state** — per-object force prior, updated after every grasp
+2. **DINO RAG** — for new objects only: embed detection crop, retrieve visually similar past grasps, weighted-mean force. n=0 so DeliGrasp is never skipped on a new object's first grasp.
+3. **Blend with DeliGrasp** — weight = `min(0.7, n/10)` — at n=7 it's 70% memory
+4. **Skip DeliGrasp** — if n≥5 and std<1N for THIS object, no Gemini API call needed
+
+Training labels: `true_force_label` = force after slip-guard corrections (DAgger/HER relabeling). `force_label_error_n` = gap between initial prediction and truth.
+
+---
+
+## Point cloud pipeline
+
+```
+depth image + SAM3 mask
+        │
+        ├─ Scan 1: detection position (side view) → pts_cln1
+        ├─ Scan 2: top-down position              → pts_cln2
+        │
+        ├─ Spatial crop: 12cm radius around object centroid + Z bounds
+        │   (eliminates table surface that leaks through the SAM3 mask)
+        │
+        ├─ Merge (pts_cln1 + pts_cln2) → pts_use
+        │
+        └─ PCA (top 30% by Z) → grasp angle, major/minor axes
+               │
+               └─ Gemini strategy override for complex shapes
+```
+
+**Important:** run `measure_table` on an empty scene before placing the object — this captures TABLE_Z (needed for grasp depth). The background point cloud (BG_PTS) is also captured for debugging, but is **not** used in the main pipeline: at VLA inference time you won't have a background scan, so training data must not depend on one.
+
+---
+
+## VLA data format
+
+Each row in `grasps_YYYY-MM-DD.jsonl`:
+
+```json
+{
+  "object": "red cube",
+  "held": true,
+  "grasp_log": [{"attempt": 1, "ap": 30.6, "force": 4.23, "status": "contact"}],
+  "true_force_label": 4.5,
+  "init_force_pred": 3.8,
+  "force_label_error_n": 0.7,
+  "sg_fires": 1,
+  "grasp_angle_deg": 31.7,
+  "grasp_strategy": "symmetric",
+  "obj_width_mm": 52.3,
+  "gp_mass_g": 120.0,
+  "gp_mu": 0.6,
+  "gp_k": 800.0,
+  "image_detect_path": "data/grasp_log/20260609_143201_image_detect.jpg",
+  "image_grasp_path": "data/grasp_log/20260609_143201_image_grasp.jpg",
+  "timestamp": "2026-06-09T14:32:05.123"
+}
+```
+
+`true_force_label` is the corrected force after slip-guard interventions — use this as the training target, not the initial Gemini prediction.
+
+---
+
+## ROS2 node API
+
+### Gripper (`/gripper/*`)
+
+| Service | Type | Description |
+|---|---|---|
+| `/gripper/open` | Trigger | Open fully |
+| `/gripper/close` | Trigger | Close to contact |
+| `/gripper/set_force` | SetGripperForce | Set max force (N) |
+| `/gripper/set_position` | SetGripperPosition | Move to position (mm) |
+| `/gripper/clear_error` | Trigger | Re-enable after AX-12 overload shutdown |
+| `/gripper/calibrate` | Trigger | Calibrate open/close limits |
+
+Topic: `/gripper/state` (10Hz) — `position` mm, `force` N, `temperature` °C, `contact_detected` bool
+
+### Arm (`/arm/*` or `/ur5/*`)
+
+| Service | Description |
+|---|---|
+| `/arm/teach_mode` | Toggle freedrive (teach) mode |
+
+### Slip guard (`/slip_guard/*`)
+
+| Service | Description |
+|---|---|
+| `/slip_guard/enable` | Start monitoring (captures reference depth on first frame) |
+| `/slip_guard/disable` | Stop monitoring |
+
+Topic: `/slip_guard/config` — `Float32MultiArray [force_n, slip_thresh, obj_u, obj_v]`
+Topic: `/slip_guard/events` — event log strings
 
 ---
 
@@ -134,220 +309,23 @@ colcon build --packages-select magpie_msgs magpie_control
 source install/setup.bash
 ```
 
----
+### Environment variables (`.env` in repo root)
 
-## ROS2 Gripper Node: Run and Control
-
-If you see:
-
-```bash
-ros2 run magpie_control gripper_node
-No executable found
 ```
-
-the package is usually not built/sourced in your ROS2 workspace yet (or you are in a different shell that is not sourced).
-
-If you see:
-
-```bash
-ModuleNotFoundError: No module named 'magpie_msgs'
-```
-
-`magpie_msgs` was not available in the current shell environment. Build both packages and source the workspace-wide setup file (not only a single package local setup).
-
-### 1. Build and source from workspace root
-
-From your ROS2 workspace root (example: `~/ws_ctrl`):
-
-```bash
-cd ~/ws_ctrl
-colcon build --packages-select magpie_msgs magpie_control
-source install/setup.bash
-```
-
-Optional sanity check:
-
-```bash
-ros2 pkg executables magpie_control
-```
-
-You should see at least:
-
-- `magpie_control gripper_node`
-- `magpie_control ft_sensor_node`
-- `magpie_control tactile_sensor_node`
-
-### 2. Run the gripper node
-
-```bash
-ros2 run magpie_control gripper_node
-```
-
-You can override parameters at startup:
-
-```bash
-ros2 run magpie_control gripper_node --ros-args \
-	-p auto_detect_port:=true \
-	-p port:=/dev/ttyUSB0 \
-	-p default_speed:=100 \
-	-p default_torque:=200
-```
-
-### 3. Control the gripper with ROS services
-
-Open gripper:
-
-```bash
-ros2 service call /gripper/open std_srvs/srv/Trigger "{}"
-```
-
-Close gripper:
-
-```bash
-ros2 service call /gripper/close std_srvs/srv/Trigger "{}"
-```
-
-Set aperture/position (millimeters):
-
-```bash
-ros2 service call /gripper/set_position magpie_msgs/srv/SetGripperPosition "{position: 40.0, speed: 0.5}"
-```
-
-Set force limit (N):
-
-```bash
-ros2 service call /gripper/set_force magpie_msgs/srv/SetGripperForce "{max_force: 8.0}"
-```
-
-Calibrate:
-
-```bash
-ros2 service call /gripper/calibrate std_srvs/srv/Trigger "{}"
-```
-
-Reset parameters (torque, speed, compliance, and open pose):
-
-```bash
-ros2 service call /gripper/reset_parameters std_srvs/srv/Trigger "{}"
-```
-
-Monitor state:
-
-```bash
-ros2 topic echo /gripper/state
-```
-
-### 4. Full Gripper Node API (Units and Interfaces)
-
-All gripper aperture/position values are in **millimeters (mm)**.
-
-#### Startup parameters
-
-- `auto_detect_port` (bool, default: `true`): auto-discover Dynamixel serial device.
-- `port` (string, default: `/dev/ttyUSB0`): explicit serial device when auto-detect is disabled.
-- `use_eflesh` (bool, default: `false`): enable eflesh sensor initialization.
-- `default_speed` (int, default: `100`): initial Dynamixel moving speed setting.
-- `default_torque` (int, default: `200`): initial Dynamixel torque limit.
-
-#### Published topic
-
-- Topic: `/gripper/state`
-- Type: `magpie_msgs/msg/GripperState`
-- Rate: 10 Hz
-- Fields:
-	- `position` (mm)
-	- `finger_positions` (mm, `[right, left]`)
-	- `force` (N)
-	- `temperature` (°C) — **`0.0` means the node has lost hardware contact; restart the node**
-	- `is_moving` (bool)
-	- `contact_detected` (bool)
-
-#### Services
-
-- `/gripper/open` (`std_srvs/srv/Trigger`)
-- `/gripper/close` (`std_srvs/srv/Trigger`)
-- `/gripper/calibrate` (`std_srvs/srv/Trigger`)
-- `/gripper/reset_parameters` (`std_srvs/srv/Trigger`)
-- `/gripper/set_force` (`magpie_msgs/srv/SetGripperForce`):
-	- request: `max_force` (N)
-- `/gripper/set_position` (`magpie_msgs/srv/SetGripperPosition`):
-	- request: `position` (mm), `speed` in [0.0, 1.0]
-	- response: `actual_position` (mm), `success`, `message`
-
-#### Action
-
-- `/gripper/deligrasp` (`magpie_msgs/action/DeliGrasp`)
-- goal params (`magpie_msgs/msg/DeliGraspParams`):
-	- `goal_aperture` (mm)
-	- `initial_force` (N)
-	- `additional_closure` (mm)
-	- `additional_force` (N)
-	- `complete_grasp` (bool)
-- result:
-	- `final_aperture` (mm)
-	- `final_force` (N)
-	- `force_log` (N samples)
-
-Example action call:
-
-```bash
-ros2 action send_goal /gripper/deligrasp magpie_msgs/action/DeliGrasp \
-"{params: {goal_aperture: 35.0, initial_force: 1.5, additional_closure: 1.0, additional_force: 0.2, complete_grasp: true}}"
-```
-
-### 5. Common ROS2 troubleshooting
-
-- Make sure your ROS distro is sourced before workspace setup:
-
-```bash
-source /opt/ros/humble/setup.bash
-source ~/ws_ctrl/install/setup.bash
-```
-
-- Avoid sourcing only one package setup (for example `install/magpie_control/local_setup.bash`) when running `gripper_node`; that can omit runtime dependencies such as `magpie_msgs`.
-
-- Verify package visibility:
-
-```bash
-ros2 pkg list | grep magpie_control
-```
-
-- If executables are still missing, rebuild cleanly:
-
-```bash
-cd ~/ws_ctrl
-rm -rf build/magpie_control install/magpie_control log
-colcon build --packages-select magpie_control
-source install/setup.bash
+GEMINI_API_KEY=your_key_here
+HF_TOKEN=your_huggingface_token
 ```
 
 ---
 
-## Bring Up Fresh Dynamixel Motors
+## Common issues
 
-This repo includes a small CLI utility to find and configure new AX-12 motors.
-
-1. Scan for motors on likely serial ports:
-
-```bash
-python -m magpie_control.dxl_setup scan --id-max 30
-```
-
-2. If two brand-new motors are attached at once (both default to ID 1), unplug one first.
-Leave one motor as ID 1, then plug in the other motor by itself and change it to ID 2:
-
-```bash
-python -m magpie_control.dxl_setup set-id --port /dev/ttyACM0 --baud 1000000 --current-id 1 --new-id 2
-```
-
-3. Optional: set baudrate (e.g., to keep everything at 1,000,000):
-
-```bash
-python -m magpie_control.dxl_setup set-baud --port /dev/ttyACM0 --baud 57600 --id 2 --new-baud 1000000
-```
-
-4. Rescan and verify both IDs are visible at 1,000,000:
-
-```bash
-python -m magpie_control.dxl_setup scan --ports /dev/ttyACM0 --bauds 1000000 --id-max 10
-```
+| Symptom | Fix |
+|---|---|
+| `AttributeError: NoneType.success` | UR5 RTDE dropped — re-run c01, check pendant external control program |
+| Gripper closes but doesn't hold | AX-12 overload: `ros2 service call /gripper/clear_error std_srvs/srv/Trigger` |
+| SAM3 no detection | Move arm 2cm closer; or check `/tmp/sam3.sock` exists (re-run c01) |
+| `TABLE_Z not set` warning | Run `measure_table` cell on a clear table before placing the object |
+| F/T sensor timeout | Check ethernet cable to 192.168.0.5; try `ping 192.168.0.5` |
+| PCA shows table surface | Spatial crop not isolating object — check that SAM3 mask is tight and `_det_crop` is captured before `fp_color = color2` reassignment |
+| DINOv2 slow on first load | Model downloads ~84MB once to `~/.cache/torch/hub`; subsequent loads are instant |
