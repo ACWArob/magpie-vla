@@ -88,9 +88,14 @@ class GraspMemory:
 
         self._priors_path = self._dir / 'force_priors.json'
         self._emb_path    = self._dir / 'embeddings.npz'
+        self._orient_path = self._dir / 'orientation_log.json'
 
         # {object_name: {x, P, n}}
         self._priors: dict = self._load_priors()
+
+        # {object_name: [ {angle, strategy, held, quality, ts}, ... ]}
+        # Orientation outcome history — drives get_angle_advice (VLA feedback loop)
+        self._orient: dict = self._load_orient()
 
         # Embedding store — loaded lazily
         self._emb_store: dict | None = None   # {embeddings, labels, names}
@@ -159,6 +164,167 @@ class GraspMemory:
         if image_crop is not None:
             emb = self._embed(image_crop)
             self._append_embedding(emb, true_force, key)
+
+    # ── Orientation feedback loop (VLA) ─────────────────────────────────────────
+
+    @staticmethod
+    def _circ180(a: float, b: float) -> float:
+        """Angular distance on a 180° period — a gripper line is symmetric, so
+        an angle θ and θ+180° produce the same grasp."""
+        d = abs((a % 180.) - (b % 180.))
+        return min(d, 180. - d)
+
+    def record_outcome(self, object_name: str, angle_deg: float, strategy: str,
+                       held: bool, quality: float | None = None,
+                       pca_angle: float | None = None) -> None:
+        """Log a grasp outcome at a given orientation. Feeds get_angle_advice and
+        get_angle_correction so the system learns which orientations slip AND the
+        systematic PCA→good-angle correction for THIS object.
+
+        pca_angle: the RAW PCA angle before any correction. Storing it lets us learn
+        the pose-invariant correction delta (final_angle - pca_angle)."""
+        key = object_name.lower().strip()
+        self._orient.setdefault(key, []).append({
+            'angle':     float(angle_deg) % 180.,
+            'pca_angle': float(pca_angle) % 180. if pca_angle is not None else None,
+            'strategy':  strategy,
+            'held':      bool(held),
+            'quality':   float(quality) if quality is not None else None,
+            'ts':        time.strftime('%Y-%m-%dT%H:%M:%S'),
+        })
+        self._orient[key] = self._orient[key][-50:]   # keep last 50 per object
+        self._save_orient()
+
+    @staticmethod
+    def _wrap90(d: float) -> float:
+        """Wrap an angle delta into (-90, 90] — the gripper line is symmetric mod
+        180°, so the meaningful correction is the smallest signed rotation."""
+        return (d + 90.) % 180. - 90.
+
+    def get_angle_correction(self, object_name: str, min_n: int = 3) -> dict | None:
+        """Learn the systematic correction between the raw PCA grasp angle and the
+        angle that actually produced HELD grasps. This is a delta, so it is
+        pose-invariant and generalises across placements (a cube placed at any
+        rotation gets the same 'PCA reads diagonal, rotate to a face' fix).
+
+        Returns {delta, n, mean_quality, spread_deg, confident} or None.
+        'confident' → trust it and skip the per-grasp Gemini visual check.
+        """
+        key  = object_name.lower().strip()
+        hist = self._orient.get(key, [])
+        # Learn ONLY from good grasps: held AND not scored poorly. A held-but-bad-angle
+        # grasp gets a low quality score (issue=angle) from the reward — including it
+        # would teach the wrong correction, so exclude quality < 0.6. Unscored (None)
+        # held grasps are kept (benefit of the doubt until the reward runs).
+        samples = [h for h in hist
+                   if h['held'] and h.get('pca_angle') is not None
+                   and (h.get('quality') is None or h['quality'] >= 0.6)]
+        if len(samples) < min_n:
+            return None
+        deltas = np.array([self._wrap90(h['angle'] - h['pca_angle'])
+                           for h in samples])
+        # Circular mean on a 180° period (double-angle trick), then halve back.
+        ang2       = np.radians(deltas * 2.)
+        mean_delta = float(np.degrees(np.arctan2(np.sin(ang2).mean(),
+                                                 np.cos(ang2).mean())) / 2.)
+        spread = float(np.std(deltas))
+        quals  = [h['quality'] for h in samples if h.get('quality') is not None]
+        mq     = float(np.mean(quals)) if quals else 0.6
+        return {
+            'delta':        mean_delta,
+            'n':            len(samples),
+            'mean_quality': mq,
+            'spread_deg':   spread,
+            'confident':    len(samples) >= 5 and spread < 15. and mq >= 0.65,
+        }
+
+    def set_last_quality(self, object_name: str, quality: float) -> None:
+        """Patch the quality of the most recent outcome (dg_summary runs after
+        record_outcome, once the reward score is known)."""
+        key = object_name.lower().strip()
+        if self._orient.get(key):
+            self._orient[key][-1]['quality'] = float(quality)
+            self._save_orient()
+
+    def get_angle_advice(self, object_name: str, proposed_angle_deg: float,
+                         symmetric: bool = False, tol_deg: float = 25.) -> dict:
+        """Has this orientation failed before for this object? If so, recommend a
+        better angle. Core of the orientation feedback loop.
+
+        Returns dict with:
+            recommend_angle      — angle to actually use (may differ from proposed)
+            overridden           — True if we changed it from the proposed angle
+            n_at_proposed        — past attempts near the proposed angle
+            success_at_proposed  — how many of those held
+            rate_at_proposed     — success fraction (None if no history)
+            reason               — human-readable explanation (also a VLA label)
+        """
+        key  = object_name.lower().strip()
+        hist = self._orient.get(key, [])
+        pa   = float(proposed_angle_deg) % 180.
+
+        near      = [h for h in hist if self._circ180(h['angle'], pa) <= tol_deg]
+        n_near    = len(near)
+        succ_near = sum(1 for h in near if h['held'])
+        rate      = (succ_near / n_near) if n_near else None
+
+        out = {
+            'proposed_angle':      float(proposed_angle_deg),
+            'recommend_angle':     float(proposed_angle_deg),
+            'n_at_proposed':       n_near,
+            'success_at_proposed': succ_near,
+            'rate_at_proposed':    rate,
+            'overridden':          False,
+            'reason': ('no orientation history' if n_near == 0
+                       else f'{succ_near}/{n_near} held near {pa:.0f}°'),
+        }
+
+        # Intervene only with ≥2 attempts AND a majority that slipped.
+        if n_near >= 2 and rate is not None and rate < 0.5:
+            fails = n_near - succ_near
+            alt = self._best_alt_angle(hist, avoid=pa, tol=tol_deg)
+            if alt is not None:
+                out['recommend_angle'] = alt
+                out['overridden'] = True
+                out['reason'] = (f'orientation ~{pa:.0f}° slipped {fails}/{n_near} times; '
+                                 f'using historically better ~{alt:.0f}°')
+            elif symmetric:
+                out['recommend_angle'] = (float(proposed_angle_deg) + 90.) % 360.
+                out['overridden'] = True
+                out['reason'] = (f'orientation ~{pa:.0f}° slipped {fails}/{n_near} times; '
+                                 f'object symmetric → rotating 90° to grip the other axis')
+            else:
+                out['reason'] = (f'orientation ~{pa:.0f}° slipped {fails}/{n_near} times; '
+                                 f'no better angle known yet (not symmetric)')
+        return out
+
+    def _best_alt_angle(self, hist: list, avoid: float, tol: float):
+        """Best historically-successful angle bucket that is far from `avoid`.
+        Returns None if no alternate holds >50% of the time."""
+        buckets: dict = {}
+        for h in hist:
+            b = (round((h['angle'] % 180.) / tol) * tol) % 180.
+            n_s = buckets.setdefault(b, [0, 0])
+            n_s[0] += 1
+            n_s[1] += 1 if h['held'] else 0
+        best, best_rate = None, 0.5   # alternate must beat 50% historical hold
+        for ang, (n, s) in buckets.items():
+            if self._circ180(ang, avoid) <= tol:
+                continue
+            rate = s / n
+            if rate > best_rate:
+                best, best_rate = ang, rate
+        return best
+
+    def _load_orient(self) -> dict:
+        if self._orient_path.exists():
+            with open(self._orient_path) as f:
+                return json.load(f)
+        return {}
+
+    def _save_orient(self) -> None:
+        with open(self._orient_path, 'w') as f:
+            json.dump(self._orient, f, indent=2)
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

@@ -19,13 +19,14 @@ pyrealsense2==2.54.2.5684      # Intel RealSense D405 (Python SDK, optional — 
 transformers>=4.44.0           # Grounding DINO (IDEA-Research/grounding-dino-tiny)
 Pillow>=9.1.0                  # Image I/O (transformers minimum version)
 opencv-python-headless>=4.8.0  # Image encoding for Gemini API, CV overlays
-numpy>=1.24,<2.0               # Core numerical (SAM3 requires <2; keep consistent)
+numpy>=1.24,<2                 # Core numerical (SAM3 requires <2; keep consistent)
+matplotlib==3.7.5              # Visualization (stable; compatible with numpy <2 and spatialmath)
 
 # --- Gemini / LLM ---
 google-genai>=1.0              # Gemini 2.5 Flash — DeliGrasp descriptor + VLM detection
 
 # --- Robotics utilities ---
-spatialmath-python>=1.0        # SE3 transforms, rotation matrices
+spatialmath-python==1.0.0      # SE3 transforms, rotation matrices (stable; numpy 1.x compatible)
 splines>=0.2                   # Trajectory splines
 psutil>=5.0                    # USB speed check (lsusb wrapper)
 

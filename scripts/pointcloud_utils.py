@@ -416,6 +416,124 @@ def grasp_rotation_matrix(grasp_angle_deg):
     ])
 
 
+def project_world_to_pixel(world_pts, tcp, tcp_to_cam, K_flat):
+    """Project Nx3 world points back to (u, v) image pixels — inverse of the camera
+    chain used in build_segmented_pcd. Accounts for the full tcp @ tcp_to_cam
+    transform, so a world-frame grasp axis lands correctly on the camera image."""
+    K = np.asarray(K_flat).ravel()
+    fx, fy, cx, cy = K[0], K[4], K[2], K[5]
+    T    = np.asarray(tcp) @ np.asarray(tcp_to_cam)
+    Tinv = np.linalg.inv(T)
+    P    = np.atleast_2d(np.asarray(world_pts, dtype=float))
+    Ph   = np.hstack([P, np.ones((len(P), 1))])
+    cam  = (Tinv @ Ph.T).T[:, :3]
+    z    = np.where(np.abs(cam[:, 2]) < 1e-6, 1e-6, cam[:, 2])
+    u    = cx + cam[:, 0] * fx / z
+    v    = cy + cam[:, 1] * fy / z
+    return np.stack([u, v], axis=1)
+
+
+def draw_grasp_on_image(image_rgb, cen_world, angle_deg, tcp, tcp_to_cam, K_flat,
+                        half_len_m=0.04, center_px=None):
+    """Draw the gripper closing axis onto the camera image.
+
+    The grasp-axis DIRECTION comes from projecting the world grasp line (robust to
+    translation calibration error — a relative direction). The CENTRE is anchored at
+    `center_px` (the SAM3 mask centroid = where the object actually is in the image)
+    when provided, so the overlay can't drift off the object due to scan-to-scan
+    registration error. Green = closing axis, orange = finger faces, red = grip centre.
+    """
+    import cv2
+    a = np.radians(angle_deg)
+    d = np.array([np.cos(a), np.sin(a), 0.]) * half_len_m
+    px = project_world_to_pixel(
+        np.array([cen_world, cen_world - d, cen_world + d]), tcp, tcp_to_cam, K_flat)
+    c_proj, p1_proj, p2_proj = px
+    direction = p2_proj - p1_proj                       # image-space axis direction
+    nrm = float(np.linalg.norm(direction))
+    if nrm < 1e-6:
+        direction, nrm = np.array([1., 0.]), 1.
+    centre = np.asarray(center_px, float) if center_px is not None else np.asarray(c_proj, float)
+    half   = direction / 2.
+    p1, p2 = centre - half, centre + half
+    perp   = np.array([-direction[1], direction[0]]) / nrm * 12.   # finger faces ⟂
+    _i = lambda p: tuple(np.round(p).astype(int))
+    vis = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR).copy()
+    cv2.line(vis, _i(p1), _i(p2), (0, 255, 0), 3)                  # closing axis
+    for endp in (p1, p2):
+        cv2.line(vis, _i(endp - perp), _i(endp + perp), (0, 165, 255), 2)
+    cv2.circle(vis, _i(centre), 5, (0, 0, 255), -1)               # grip centre
+    return vis
+
+
+def verify_grasp_angle_visual(image_rgb, cen_world, angle_deg, tcp, tcp_to_cam,
+                              K_flat, object_name, gemini_client,
+                              gemini_model='gemini-2.5-flash', half_len_m=0.04,
+                              mask=None):
+    """Render the grasp axis on the camera image and ask Gemini to confirm/correct it.
+
+    The grasp-axis DIRECTION is projected from WORLD coords; the CENTRE is anchored at
+    the SAM3 mask centroid (when `mask` given) so the overlay sits on the object even
+    if scan-to-scan calibration drifts. Gemini's correction is a rotation applied in
+    WORLD frame — no image→world angle ambiguity.
+
+    Returns (corrected_angle_deg, verdict, reason, annotated_bgr).
+    """
+    import cv2
+    from google.genai import types as gtypes
+
+    center_px = None
+    if mask is not None and np.asarray(mask).any():
+        _ys, _xs = np.where(np.asarray(mask))
+        center_px = (float(_xs.mean()), float(_ys.mean()))
+
+    vis = draw_grasp_on_image(image_rgb, cen_world, angle_deg,
+                              tcp, tcp_to_cam, K_flat, half_len_m, center_px=center_px)
+    ok, buf = cv2.imencode('.jpg', vis)
+    prompt = (
+        f'The GREEN line is the axis the two-finger gripper will CLOSE along to grasp '
+        f'the "{object_name}". Orange ticks = finger contact faces, red dot = grip centre.\n'
+        f'A GOOD grasp line is PARALLEL to the object two flat opposing faces '
+        f'(perpendicular to its edges), closing across its narrowest width.\n'
+        f'Judge the PRECISE alignment with the object actual orientation. If the line '
+        f'is slightly off the faces, give the small rotation that makes it parallel to '
+        f'them — this is usually only a FEW degrees to match how the object is sitting. '
+        f'Do NOT snap to 90; only use a large rotation if the line is genuinely across '
+        f'the wrong (widest/diagonal) dimension.\n'
+        f'Reply in EXACTLY this format:\n'
+        f'VERDICT: <GOOD|ROTATE>\n'
+        f'ROTATE_DEG: <precise signed degrees to rotate the green line so it is parallel '
+        f'to the faces, -90 to 90; 0 if already aligned>\n'
+        f'REASON: <one short sentence>'
+    )
+    try:
+        txt = gemini_client.models.generate_content(
+            model=gemini_model,
+            contents=[gtypes.Part.from_bytes(data=buf.tobytes(),
+                                             mime_type='image/jpeg'), prompt]).text
+    except Exception as e:
+        return float(angle_deg), 'skipped', f'gemini failed: {e}', vis
+
+    verdict, rot, reason = 'GOOD', 0., ''
+    for line in txt.splitlines():
+        L = line.strip()
+        up = L.upper()
+        if up.startswith('VERDICT:'):
+            verdict = L.split(':', 1)[1].strip().upper()
+        elif up.startswith('ROTATE_DEG:'):
+            try:
+                rot = float(L.split(':', 1)[1].strip().split()[0])
+            except Exception:
+                rot = 0.
+        elif up.startswith('REASON:'):
+            reason = L.split(':', 1)[1].strip()
+
+    corrected = float((angle_deg + (rot if verdict.startswith('ROTATE') else 0.)) % 180.)
+    vis2 = draw_grasp_on_image(image_rgb, cen_world, corrected,
+                               tcp, tcp_to_cam, K_flat, half_len_m, center_px=center_px)
+    return corrected, verdict, reason, vis2
+
+
 def print_pcd_results(result, n_points):
     """Pretty-print analyse_pcd output."""
     c = result['centroid']

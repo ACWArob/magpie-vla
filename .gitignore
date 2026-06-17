@@ -1,5 +1,11 @@
 build
 *.egg-info
-*/*/*/*.pyc
+__pycache__/
+*.pyc
 .env
-.env
+.ipynb_checkpoints/
+
+# large local artifacts — datasets, rerun recordings, model weights
+data/
+*.rrd
+*.tar

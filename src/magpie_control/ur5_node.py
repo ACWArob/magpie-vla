@@ -5,6 +5,8 @@ UR5 ROS2 Node - Wraps existing UR5_Interface for ROS control
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import PoseStamped
 from std_srvs.srv import Trigger
@@ -128,8 +130,14 @@ class UR5Node(Node):
         self.create_subscription(JointState,   'arm/servo_j_cmd', self.servo_j_callback, 10)
         self.create_subscription(PoseStamped,  'arm/servo_l_cmd', self.servo_l_callback, 10)
 
+        # Publish TCP/joints from a SEPARATE callback group so the state timer keeps
+        # firing during blocking move_l / move_j service calls. Without this (single
+        # default group), TCP only updates at move boundaries — which makes recorded
+        # trajectories jump between waypoints instead of showing smooth motion.
         pub_rate = self.get_parameter('publish_rate').value
-        self.timer = self.create_timer(1.0 / pub_rate, self.publish_state)
+        self._state_cbg = MutuallyExclusiveCallbackGroup()
+        self.timer = self.create_timer(1.0 / pub_rate, self.publish_state,
+                                       callback_group=self._state_cbg)
 
         self.get_logger().info('UR5 Node initialized')
 
@@ -319,8 +327,13 @@ class UR5Node(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = UR5Node()
+    # MultiThreadedExecutor so the state-publish timer (its own callback group) runs
+    # concurrently with blocking move_l / move_j service calls → /arm/tcp_pose keeps
+    # streaming at full rate during motion (smooth trajectories for VLA recording).
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
