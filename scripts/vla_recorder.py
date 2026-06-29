@@ -184,6 +184,39 @@ class VLARecorder:
                 print(f'  [VLA] resumed existing dataset ({self._ds.num_episodes} episodes)')
                 return
             except Exception as e:
+                # Corrupted trailing file (partial write without finalize) — find and remove it,
+                # then rewind info.json to match the last good episode in the episodes meta.
+                print(f'  [VLA] resume failed ({type(e).__name__}), scanning for corrupted files...')
+                import json as _json, pyarrow.parquet as _pq
+                _repaired = False
+                for _f in sorted((self.root / 'data').rglob('*.parquet'), reverse=True):
+                    try:
+                        _pq.read_metadata(_f)
+                    except Exception:
+                        print(f'  [VLA] removing corrupted {_f.name}')
+                        # Also remove the matching video shard
+                        _idx = _f.stem  # e.g. file-001
+                        _chunk = _f.parent.name
+                        for _vid in (self.root / 'videos').rglob(f'{_chunk}/{_idx}.mp4'):
+                            _vid.unlink(missing_ok=True)
+                        _f.unlink()
+                        _repaired = True
+                if _repaired:
+                    # Recount good episodes from the episodes meta parquet
+                    _ep_files = list((self.root / 'meta' / 'episodes').rglob('*.parquet'))
+                    _n_ep = sum(_pq.read_metadata(f).num_rows for f in _ep_files)
+                    _n_fr = sum(_pq.read_metadata(f).num_rows
+                                for f in (self.root / 'data').rglob('*.parquet'))
+                    _info_path = self.root / 'meta' / 'info.json'
+                    _info = _json.loads(_info_path.read_text())
+                    _info['total_episodes'] = _n_ep
+                    _info['total_frames']   = _n_fr
+                    _info['splits']         = {'train': f'0:{_n_ep}'}
+                    _info_path.write_text(_json.dumps(_info, indent=4))
+                    print(f'  [VLA] repaired: {_n_ep} episode(s), {_n_fr} frames — retrying open...')
+                    self._ds = LeRobotDataset(self.repo_id, root=str(self.root))
+                    print(f'  [VLA] resumed after repair ({self._ds.num_episodes} episodes)')
+                    return
                 raise RuntimeError(
                     f'A LeRobot dataset already exists at {self.root} but could not be '
                     f'reopened to append ({e}). Either finalize+train on it, or point '
@@ -356,6 +389,24 @@ class VLARecorder:
               f'task="{self._task}"')
         self._buf = []
         return True
+
+    def flush_episode(self):
+        """Close the current episode's parquet/video writers so the file is immediately
+        readable. Does NOT shut down the recorder node — more episodes can follow.
+        Call this after each commit() to avoid corrupt files if the kernel dies."""
+        if self._ds is None:
+            return
+        try:
+            self._ds._close_writer()
+            self._ds.meta._close_writer()
+            enc = getattr(self._ds, '_streaming_encoder', None)
+            if enc is not None:
+                enc.close()
+        except Exception as e:
+            print(f'  [VLA] flush_episode warning: {e}')
+        n = self._ds.num_episodes
+        self._ds = None   # force _ensure_ds to re-open cleanly on next commit
+        print(f'  [VLA] episode flushed to disk ({n} total) — file is valid ✓')
 
     def finalize(self):
         """Flush parquet/video writers — REQUIRED before the dataset can be loaded
