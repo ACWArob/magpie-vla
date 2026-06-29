@@ -133,7 +133,7 @@ Between grasps: reset the object, re-run cells 7 → 8.
 
 Visualise a recorded episode:
 ```bash
-python -m lerobot.scripts.visualize_dataset \
+python -m lerobot.scripts.lerobot_dataset_viz \
   --repo-id magpie/grasp \
   --root ~/magpie_control/data/lerobot_magpie \
   --episode-index 0
