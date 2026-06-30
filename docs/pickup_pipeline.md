@@ -56,7 +56,11 @@ PCA on the top-layer point cloud gives the object's major/minor axes. Three stra
 - `short_side` — grip across the narrow axis (most stable)
 - `long_side` — grip along the long axis (for flat objects)
 
-**GraspGenX** (NVlabs cross-embodiment model, conditioned on MAGPIE's swept volume) proposes a 6-DOF grasp pose. Its angle is compared against the PCA winner; Gemini arbitrates if they disagree by more than 3°.
+**GraspGenX** (NVlabs cross-embodiment model, conditioned on MAGPIE's swept volume) proposes a 6-DOF grasp pose, clustered into up to 3 candidate angles. It runs in a **background thread fired immediately after the point cloud is built**, overlapping the ~350 ms of PCA computation/visualisation on the main thread — by the time PCA finishes, GraspGenX is usually already done, so the parallelisation is close to free.
+
+The PCA angle and the GraspGenX cluster angles are pooled into a candidate list, and **Gemini arbitrates across all of them** (`rank_grasp_angles_visual`) rather than a simple 2-way PCA-vs-GraspGenX disagreement check — it looks at the live wrist image and picks the candidate that grips the narrowest stable width across two flat faces.
+
+**VRAM: SAM3 and GraspGenX coexist** on the 8 GB card (measured: SAM3 ≈3.9 GB + GraspGenX ≈0.8 GB, peak ≈4.8 GB during real inference, ≈3 GB headroom). Both are preloaded at notebook startup and **stay warm for the entire session** — no per-grasp kill/reload of either model. This also keeps SAM3 available for the centering check and live recalibration below, which previously broke under an earlier kill/swap design.
 
 ![PCA Plot](../data/grasp_log/20260629_143039_pca_plot.jpg)
 
@@ -65,7 +69,7 @@ PCA on the top-layer point cloud gives the object's major/minor axes. Three stra
 open gripper
 → approach (APPROACH_H = 10 cm above object)
 → rotate wrist to grasp angle
-→ pre-descent centering check (SAM3 mask centroid vs image centre, ≤80 px threshold)
+→ pre-descent centering check (SAM3 re-detects the object live, mask centroid vs image centre, ≤80 px threshold; if off and a simple XY correction is unreliable, triggers live `auto_calibrate()` recalibration before continuing)
 → descend to grasp Z (object midpoint − arc compensation for finger drop)
 → DeliGrasp close: Gemini estimates mass/stiffness/friction → force setpoint
 → slip guard: monitors wrist Fz; re-closes if grip slips
@@ -89,7 +93,7 @@ Throughout the grasp, `VLARecorder` samples at 10 Hz:
 - **Action**: commanded TCP pose + grip open/close
 - **Image**: wrist camera RGB (848×480)
 
-Episodes pass a **reward gate** (object held AND grasp quality ≥ 0.6) before being committed to the LeRobot dataset at `data/lerobot_magpie/`. Each episode is flushed to disk immediately after commit — no data loss if the kernel dies.
+Episodes pass a **reward gate** (object held AND grasp quality ≥ 0.6) before being committed to the LeRobot dataset at `data/lerobot_magpie/`. An episode whose centering check above ended in `unreliable` (object lost after rotation, or recalibration itself was untrustworthy) is excluded from the gate regardless of grasp success, since the recorded pose can't be trusted as a clean demonstration. Each episode is flushed to disk immediately after commit — no data loss if the kernel dies.
 
 ---
 
@@ -111,10 +115,12 @@ Camera-to-TCP distance = 0.144 m (0.120 m nominal + 0.024 m measured mount offse
 ```
 notebooks/magpie_collect.ipynb
   Cell 0:   title / notes
-  Cells 1–6: startup (ROS nodes, imports, constants, Demo node)
+  Cells 1–6: startup (ROS nodes, imports, constants, Demo node, GraspGenX preload)
   Cell 7:   full pickup  ← run this each grasp
   Cell 8:   summary + commit + Rerun  ← run after each grasp
 ```
+
+Cell 1 starts the GraspGenX ZMQ server in the background during startup so it's warm by the first grasp; it then stays resident alongside SAM3 for the rest of the session (see VRAM note above).
 
 Between grasps: reset the object, re-run cells 7 → 8.
 

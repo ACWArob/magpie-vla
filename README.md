@@ -2,6 +2,8 @@
 
 Autonomous grasping stack for the UR5 + MAGPIE gripper. Detects any object by name, computes a force-controlled grasp using physics-based parameters (DeliGrasp via Gemini), and adapts in real-time using depth-based slip detection and a persistent Kalman-filtered grasp memory that improves with each attempt. Logs full VLA training data including a Gemini-based grasp quality reward signal.
 
+Grasp pose planning runs both **PCA** (point-cloud principal axes) and **GraspGenX** (NVlabs cross-embodiment 6-DOF grasp model) in parallel, with Gemini arbitrating across all candidates. See [docs/pickup_pipeline.md](docs/pickup_pipeline.md) for the current `notebooks/magpie_collect.ipynb`-based pickup pipeline, including the GraspGenX/SAM3 VRAM coexistence design. The diagram and cell names below describe the original `magpie_demo.ipynb` walkthrough.
+
 ---
 
 ## Architecture overview
@@ -39,7 +41,9 @@ Autonomous grasping stack for the UR5 + MAGPIE gripper. Detects any object by na
 |---|---|
 | `slip_guard_node.py` | ROS2 node — depth-primary slip detection at 10Hz; re-clamps grip if object drops >1mm during lift |
 | `grasp_memory.py` | Persistent force priors: named Kalman filter per object + DINOv2 RAG for new objects |
-| `pointcloud_utils.py` | Depth→world point cloud, dual-scan merge, spatial crop, PCA grasp angle, Gemini strategy override |
+| `pointcloud_utils.py` | Depth→world point cloud, dual-scan merge, spatial crop, PCA grasp angle, multi-candidate Gemini arbiter (`rank_grasp_angles_visual`) |
+| `grasp_detectors/graspgenx_zmq.py` | ZMQ client for the GraspGenX server (cross-embodiment 6-DOF grasp poses, MAGPIE gripper conditioning) |
+| `run_graspgenx_server.sh` | Launches the GraspGenX ZMQ server (`:5557`); preloaded at notebook startup, coexists with SAM3 in VRAM all session |
 | `seed_ycb_priors.py` | Pre-populate force priors from YCB dataset (50 objects) — so first grasp isn't cold |
 | `measure_poll_rates.py` | Measure actual ROS publish rates for all sensors |
 | `vlm_consistency.py` | Test Gemini detection/DeliGrasp stability across N repeated calls |
@@ -592,6 +596,7 @@ SAM3 runs as a subprocess (`sam3_infer.py`) and communicates via Unix socket at 
 - Model requires HuggingFace token (`HF_TOKEN` in `.env`) for first download
 - Float32 patch applied automatically in `sam3_infer.py` for RTX 2070 compatibility
 - If socket is missing: re-run c01 to restart the subprocess
+- SAM3 and the GraspGenX grasp-pose server coexist in VRAM (measured ~3.9GB + ~0.8GB, ~3GB headroom on an 8GB card) and both stay resident for the whole session — SAM3 is never killed to make room for GraspGenX, so it stays available for the pre-descent centering check and live recalibration mid-pickup
 
 ---
 

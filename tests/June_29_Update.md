@@ -10,7 +10,7 @@ Replaced prior grasp detectors with **GraspGenX** (NVlabs, ICRA 2026) — a cros
 
 - Server runs on `:5557` via ZMQ, generates 50 grasp candidates in ~0.7s, confidence up to 0.99
 - Integrated into pickup pipeline as `GRASP_METHOD='graspgenx'`; falls back to PCA if server is unavailable
-- VRAM budget: GraspGenX (~3 GB) and SAM3 (~4 GB) swap on the RTX 2070 (8 GB); SAM3 auto-restarts after each grasp
+- VRAM budget: GraspGenX (~3 GB) and SAM3 (~4 GB) swap on the RTX 2070 (8 GB); SAM3 auto-restarts after each grasp *(superseded June 30 — see [June_30_Update.md](./June_30_Update.md): measured coexistence, swap removed)*
 
 **Files:** `scripts/grasp_detectors/graspgenx_zmq.py`, `scripts/run_graspgenx_server.sh`, `scripts/grasp_detectors/GRASPGENX.md`
 
@@ -78,7 +78,7 @@ After each successful grasp, the episode is immediately flushed to disk (`flush_
 
 ## 6. Pre-Descent Centering Check
 
-After wrist rotation and before descending, SAM3 re-detects the object and checks if its centroid is within 80 px of the image centre. Warns if the gripper is likely to miss laterally. Non-blocking — proceeds regardless, but the offset is printed for calibration tuning.
+After wrist rotation and before descending, SAM3 re-detects the object and checks if its centroid is within 80 px of the image centre. Warns if the gripper is likely to miss laterally. Non-blocking — proceeds regardless, but the offset is printed for calibration tuning. *(superseded June 30 — see [June_30_Update.md](./June_30_Update.md): now corrective, with a live-recalibration escalation path)*
 
 ---
 
