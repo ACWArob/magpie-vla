@@ -315,11 +315,11 @@ class UR5Node(Node):
         self.get_logger().info('Shutting down UR5 Node...')
         try:
             self.ur5.ctrl.servoStop()  # exit servo mode if active
-        except:
+        except Exception:
             pass
         try:
             self.ur5.stop()
-        except:
+        except Exception:
             pass
         super().destroy_node()
 
@@ -332,6 +332,14 @@ def main(args=None):
     # streaming at full rate during motion (smooth trajectories for VLA recording).
     executor = MultiThreadedExecutor(num_threads=4)
     executor.add_node(node)
+    # Treat SIGTERM (what `pkill` / ROS launch shutdown sends) like Ctrl-C, so the `finally`
+    # runs destroy_node() -> ur5.stop() -> stopScript() and the RTDE control script is
+    # released cleanly. Without this, SIGTERM kills Python instantly and leaves the script
+    # stuck on the robot ("Failed to start control script" on the next launch).
+    import signal
+    def _graceful_term(*_):
+        raise KeyboardInterrupt
+    signal.signal(signal.SIGTERM, _graceful_term)
     try:
         executor.spin()
     except KeyboardInterrupt:

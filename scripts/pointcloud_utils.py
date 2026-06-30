@@ -320,7 +320,7 @@ def smart_grasp_angle(pca_result, object_name='', image_rgb=None,
 
     Returns (angle_deg, strategy, reason).
     """
-    import cv2, base64, tempfile, os
+    import cv2
 
     major = pca_result['extent_m'][0]
     minor = pca_result['extent_m'][1]
@@ -351,11 +351,8 @@ def smart_grasp_angle(pca_result, object_name='', image_rgb=None,
     if gemini_client is not None and image_rgb is not None and object_name:
         try:
             from google.genai import types as gtypes
-            tmp = tempfile.mktemp(suffix='.jpg')
-            cv2.imwrite(tmp, cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
-            with open(tmp, 'rb') as fh:
-                img_bytes = fh.read()
-            os.unlink(tmp)
+            _, _buf = cv2.imencode('.jpg', cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR))
+            img_bytes = _buf.tobytes()
 
             prompt = (
                 f'Object: "{object_name}"\n'
@@ -389,7 +386,7 @@ def smart_grasp_angle(pca_result, object_name='', image_rgb=None,
     else:  # long_side
         angle = pca_angle                   # grip across long dim → contact short faces
 
-    angle = float(angle) % 90.   # wrist limit: symmetric jaws so 0-90° covers all orientations
+    angle = float(angle) % 180.  # half-turn normalise; caller clips to [0,90] wrist range
     return angle, strategy, reason
 
 
@@ -532,6 +529,253 @@ def verify_grasp_angle_visual(image_rgb, cen_world, angle_deg, tcp, tcp_to_cam,
     vis2 = draw_grasp_on_image(image_rgb, cen_world, corrected,
                                tcp, tcp_to_cam, K_flat, half_len_m, center_px=center_px)
     return corrected, verdict, reason, vis2
+
+
+def compare_grasp_angles_visual(image_rgb, cen_world, angle_a_deg, angle_b_deg,
+                                tcp, tcp_to_cam, K_flat, object_name, gemini_client,
+                                label_a='A', label_b='B', gemini_model='gemini-2.5-flash',
+                                half_len_m=0.04, mask=None):
+    """Draw TWO candidate gripper closing axes (A and B) and let Gemini ARBITRATE.
+
+    Use when two planners disagree (e.g. PCA vs GraspGenX): PCA is unreliable on a
+    near-square top, GraspGenX is starved by a flat single-view cloud, so neither is
+    trustworthy alone. Gemini looks at the real object and picks the line that grips
+    the narrowest width across two flat faces, with a small parallel correction.
+
+    Returns (chosen_angle_deg, chosen_label, reason, annotated_bgr).
+    """
+    import cv2
+    from google.genai import types as gtypes
+
+    center_px = None
+    if mask is not None and np.asarray(mask).any():
+        _ys, _xs = np.where(np.asarray(mask))
+        center_px = (float(_xs.mean()), float(_ys.mean()))
+
+    def _axis_pts(angle):
+        a = np.radians(angle)
+        d = np.array([np.cos(a), np.sin(a), 0.]) * half_len_m
+        return project_world_to_pixel(
+            np.array([cen_world, cen_world - d, cen_world + d]), tcp, tcp_to_cam, K_flat)
+
+    _i = lambda p: tuple(np.round(np.asarray(p)).astype(int))
+    vis = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR).copy()
+    centre_px = np.asarray(center_px, float) if center_px is not None else None
+    colours = {'A': (0, 255, 0), 'B': (255, 0, 0)}           # A green, B blue (BGR)
+    for lbl, ang in (('A', angle_a_deg), ('B', angle_b_deg)):
+        c_proj, p1_proj, p2_proj = _axis_pts(ang)
+        direction = p2_proj - p1_proj
+        nrm = float(np.linalg.norm(direction)) or 1.
+        ctr = centre_px if centre_px is not None else np.asarray(c_proj, float)
+        half = direction / 2.
+        a1, a2 = ctr - half, ctr + half
+        cv2.line(vis, _i(a1), _i(a2), colours[lbl], 3)
+        cv2.putText(vis, lbl, _i(a2 + direction / nrm * 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, colours[lbl], 2)
+    if centre_px is not None:
+        cv2.circle(vis, _i(centre_px), 5, (0, 0, 255), -1)
+
+    ok, buf = cv2.imencode('.jpg', vis)
+    prompt = (
+        f'Two candidate gripper CLOSING axes are drawn over the "{object_name}": '
+        f'line A (GREEN, {angle_a_deg:.0f} deg) and line B (BLUE, {angle_b_deg:.0f} deg). '
+        f'The two-finger gripper closes ALONG the chosen line, its fingers pressing the '
+        f'two object faces that the line points at.\n'
+        f'The BETTER grasp closes across the object NARROWEST width, with the line PARALLEL '
+        f'to two flat opposing faces (perpendicular to the long edges). For a near-square '
+        f'top either axis can work — pick the one most parallel to a real pair of faces.\n'
+        f'Reply in EXACTLY this format:\n'
+        f'CHOICE: <A|B>\n'
+        f'ROTATE_DEG: <small signed deg to rotate the chosen line parallel to the faces, '
+        f'-90 to 90; 0 if already aligned>\n'
+        f'REASON: <one short sentence>'
+    )
+    try:
+        txt = gemini_client.models.generate_content(
+            model=gemini_model,
+            contents=[gtypes.Part.from_bytes(data=buf.tobytes(),
+                                             mime_type='image/jpeg'), prompt]).text
+    except Exception as e:
+        return float(angle_a_deg), label_a, f'gemini failed: {e}', vis
+
+    choice, rot, reason = 'A', 0., ''
+    for line in txt.splitlines():
+        L = line.strip(); up = L.upper()
+        if up.startswith('CHOICE:'):
+            c = L.split(':', 1)[1].strip().upper()
+            choice = 'B' if c.startswith('B') else 'A'
+        elif up.startswith('ROTATE_DEG:'):
+            try:
+                rot = float(L.split(':', 1)[1].strip().split()[0])
+            except Exception:
+                rot = 0.
+        elif up.startswith('REASON:'):
+            reason = L.split(':', 1)[1].strip()
+
+    base = angle_a_deg if choice == 'A' else angle_b_deg
+    chosen_label = label_a if choice == 'A' else label_b
+    chosen = float((base + rot) % 180.)
+    vis2 = draw_grasp_on_image(image_rgb, cen_world, chosen,
+                               tcp, tcp_to_cam, K_flat, half_len_m, center_px=center_px)
+    return chosen, chosen_label, reason, vis2
+
+
+def rank_grasp_angles_visual(image_rgb, cen_world, candidates, tcp, tcp_to_cam, K_flat,
+                              object_name='object', gemini_client=None, gemini_model='gemini-2.5-flash',
+                              half_len_m=0.06, mask=None):
+    """Show up to 4 angle candidates as labelled lines and let Gemini rank/pick the best.
+
+    candidates : list of (label_str, angle_deg) e.g.
+                 [('PCA-short', 30.), ('PCA-long', 120.), ('GGX-1', 45.), ('GGX-2', 80.)]
+                 All angles should already be wrist-clamped (0–90°).
+
+    Returns (chosen_angle_deg, chosen_label, reason, annotated_bgr).
+    """
+    import cv2
+    from google.genai import types as gtypes
+
+    COLOURS = [(0, 200, 0), (255, 80, 0), (0, 180, 255), (200, 0, 200)]  # G O C M (BGR)
+    LETTERS = ['A', 'B', 'C', 'D']
+
+    center_px = None
+    if mask is not None and np.asarray(mask).any():
+        _ys, _xs = np.where(np.asarray(mask))
+        center_px = (float(_xs.mean()), float(_ys.mean()))
+
+    def _axis_pts(angle):
+        a = np.radians(angle)
+        d = np.array([np.cos(a), np.sin(a), 0.]) * half_len_m
+        return project_world_to_pixel(
+            np.array([cen_world, cen_world - d, cen_world + d]), tcp, tcp_to_cam, K_flat)
+
+    _i = lambda p: tuple(np.round(np.asarray(p)).astype(int))
+    vis = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR).copy()
+    ctr_px = np.asarray(center_px, float) if center_px is not None else None
+
+    for idx, (lbl, ang) in enumerate(candidates[:4]):
+        col = COLOURS[idx]; letter = LETTERS[idx]
+        c_proj, p1_proj, p2_proj = _axis_pts(ang)
+        direction = p2_proj - p1_proj
+        nrm = float(np.linalg.norm(direction)) or 1.
+        ctr = ctr_px if ctr_px is not None else np.asarray(c_proj, float)
+        a1, a2 = ctr - direction / 2., ctr + direction / 2.
+        cv2.line(vis, _i(a1), _i(a2), col, 3)
+        cv2.putText(vis, f'{letter}:{ang:.0f}°', _i(a2 + direction / nrm * 14),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2)
+    if ctr_px is not None:
+        cv2.circle(vis, _i(ctr_px), 5, (0, 0, 255), -1)
+
+    ok, buf = cv2.imencode('.jpg', vis)
+    lines_desc = '  '.join(f'{LETTERS[i]}={lbl}({ang:.0f}°)' for i, (lbl, ang) in enumerate(candidates[:4]))
+    prompt = (
+        f'A two-finger gripper will grasp the "{object_name}". '
+        f'{len(candidates[:4])} candidate CLOSING axes are shown: {lines_desc}. '
+        f'The gripper fingers press the two object faces the chosen line points at. '
+        f'Pick the line most parallel to a pair of flat opposing faces — '
+        f'gripping across the NARROWEST span between two flat faces is best. '
+        f'For a rectangular or square object, reject any diagonal that hits corners.\n'
+        f'Reply EXACTLY:\n'
+        f'CHOICE: <{"|".join(LETTERS[:len(candidates[:4])])}>\n'
+        f'ROTATE_DEG: <signed degrees to fine-tune, -15 to 15; 0 if already aligned>\n'
+        f'REASON: <one sentence>'
+    )
+    try:
+        txt = gemini_client.models.generate_content(
+            model=gemini_model,
+            contents=[gtypes.Part.from_bytes(data=buf.tobytes(), mime_type='image/jpeg'), prompt]).text
+    except Exception as e:
+        return float(candidates[0][1]), candidates[0][0], f'gemini failed: {e}', vis
+
+    choice_idx, rot, reason = 0, 0., ''
+    for line in txt.splitlines():
+        L = line.strip(); up = L.upper()
+        if up.startswith('CHOICE:'):
+            c = L.split(':', 1)[1].strip().upper()
+            for k, letter in enumerate(LETTERS[:len(candidates[:4])]):
+                if c.startswith(letter):
+                    choice_idx = k; break
+        elif up.startswith('ROTATE_DEG:'):
+            try: rot = float(L.split(':', 1)[1].strip().split()[0])
+            except Exception: rot = 0.
+        elif up.startswith('REASON:'):
+            reason = L.split(':', 1)[1].strip()
+
+    chosen_lbl = candidates[choice_idx][0]
+    chosen_ang = float((candidates[choice_idx][1] + rot) % 180.)
+    vis2 = draw_grasp_on_image(image_rgb, cen_world, chosen_ang,
+                               tcp, tcp_to_cam, K_flat, half_len_m, center_px=center_px)
+    return chosen_ang, chosen_lbl, reason, vis2
+
+
+def augment_cloud_for_graspgenx(pts, table_z, n_side=400, n_bottom=200,
+                                extra_height_m=0.0, seed=0):
+    """Augment a flat top-down object cloud with synthetic side + bottom faces.
+
+    GraspGenX was trained on partial but 3D rendered clouds (multiple viewpoints).
+    A single top-down scan gives only the top face — a flat disk that starves the
+    model of shape info and pushes grasps to the rim.  This function fits a 2D OBB
+    (via PCA on the XY footprint), infers object height from TABLE_Z, then samples
+    uniform points on the 4 side faces and bottom, giving GraspGenX a realistic 3D
+    volume that matches its training distribution.
+
+    Args:
+        pts:            (N, 3) float — real top-face points in world frame
+        table_z:        float — world-frame Z of the table surface (TABLE_Z constant)
+        n_side:         int — total synthetic points across all 4 side faces (100 per face)
+        n_bottom:       int — synthetic points on the bottom face
+        extra_height_m: float — extend the bottom this many metres below table_z.
+                        Use CAMERA_MOUNT_Z_OFFSET_M to correct for camera mount error
+                        (camera reads the floor ~24mm high), giving GraspGenX the true
+                        object height without touching arm movement constants.
+        seed:           int — RNG seed for reproducibility
+
+    Returns:
+        (M, 3) float32 — augmented cloud (real pts stacked with synthetic faces)
+    """
+    pts = np.asarray(pts, dtype=np.float64)
+    if len(pts) < 6:
+        return pts.astype(np.float32)
+
+    rng = np.random.default_rng(seed)
+
+    # 2D PCA on the horizontal footprint → OBB axes in XY
+    xy = pts[:, :2]
+    mu_xy = xy.mean(axis=0)
+    cov_xy = np.cov((xy - mu_xy).T)
+    vals, vecs = np.linalg.eigh(cov_xy)
+    axes_xy = vecs[:, np.argsort(vals)[::-1]]   # (2,2) columns = principal XY axes
+
+    # Object extents in the OBB frame
+    local_xy = (xy - mu_xy) @ axes_xy            # (N, 2)
+    lo = local_xy.min(axis=0)
+    hi = local_xy.max(axis=0)
+
+    z_top = pts[:, 2].max()
+    z_bot = table_z - extra_height_m             # extend below camera-measured floor
+
+    synth = []
+    per_face = max(n_side // 4, 1)
+
+    # 4 side faces: fix one OBB horizontal dim, free the other + world Z
+    for face_dim in (0, 1):
+        other = 1 - face_dim
+        for val in (lo[face_dim], hi[face_dim]):
+            local_f = np.zeros((per_face, 2))
+            local_f[:, face_dim] = val
+            local_f[:, other] = rng.uniform(lo[other], hi[other], per_face)
+            world_xy = local_f @ axes_xy.T + mu_xy
+            world_z  = rng.uniform(z_bot, z_top, per_face)
+            synth.append(np.column_stack([world_xy, world_z]))
+
+    # Bottom face: full XY footprint at z_bot (true floor estimate)
+    local_b = np.column_stack([
+        rng.uniform(lo[0], hi[0], n_bottom),
+        rng.uniform(lo[1], hi[1], n_bottom),
+    ])
+    world_b_xy = local_b @ axes_xy.T + mu_xy
+    synth.append(np.column_stack([world_b_xy, np.full(n_bottom, z_bot)]))
+
+    return np.vstack([pts, *synth]).astype(np.float32)
 
 
 def print_pcd_results(result, n_points):

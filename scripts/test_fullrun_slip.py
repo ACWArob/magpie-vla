@@ -350,13 +350,19 @@ def detect_object_sam3_socket(image_rgb, query, sock_path='/tmp/sam3.sock'):
 
 
 def _depth_at(depth, seg_mask, u, v_px):
+    """Safely get the median depth in meters for a given detection.
+    This is the corrected logic, matching test_dryrun_analyze.py.
+    """
     if seg_mask is not None and seg_mask.any():
         valid = depth[seg_mask].astype(float)
+        valid = valid[valid > 0]
+        print(f'  Using SAM3 mask depth ({len(valid)} pixels)')
     else:
         pad = 5
         roi = depth[max(0, v_px-pad):v_px+pad, max(0, u-pad):u+pad].astype(float)
-        valid = roi.ravel()
-    valid = valid[valid > 0]
+        valid = roi[roi > 0]  # Correctly filter non-zero from the 2D ROI
+        print(f'  Using 10x10 ROI depth ({len(valid)} pixels)')
+
     return float(np.median(valid)) / 1000.0 if len(valid) > 0 else None
 
 
@@ -485,19 +491,11 @@ def main():
     print(f'  Best detection: "{labels[best]}"  score={scores[best]:.3f}')
     print(f'  Centroid pixel: ({u}, {v_px})' + (' (mask centroid)' if seg_mask is not None else ''))
 
-    if seg_mask is not None and seg_mask.any():
-        valid = depth[seg_mask].astype(float)
-        valid = valid[valid > 0]
-        print(f'  Using SAM3 mask depth ({len(valid)} pixels)')
-    else:
-        pad = 5
-        roi = depth[max(0, v_px-pad):v_px+pad, max(0, u-pad):u+pad].astype(float)
-        valid = roi[roi > 0]
-    if len(valid) == 0:
+    depth_m = _depth_at(depth, seg_mask, u, v_px)
+    if depth_m is None:
         print('ERROR: no valid depth at detection centroid.')
         node.destroy_node(); rclpy.shutdown(); sys.exit(1)
 
-    depth_m = float(np.median(valid)) / 1000.0
     fx, fy  = caminfo.k[0], caminfo.k[4]
     cx, cy  = caminfo.k[2], caminfo.k[5]
     p_cam   = np.array([(u - cx) * depth_m / fx, (v_px - cy) * depth_m / fy, depth_m])

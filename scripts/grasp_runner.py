@@ -50,7 +50,7 @@ def _grasp_pose_from(grasp, scene, const):
     return pose
 
 
-def execute_grasp(node, grasp_pose, width, force, const, rclpy):
+def execute_grasp(node, grasp_pose, force, const, rclpy):
     """Open → approach above → descend to grasp → close at `force` → lift. Returns outcome."""
     import numpy as np
     t0 = time.time()
@@ -92,6 +92,6 @@ def full_run(node, detector, scene, const, rclpy, force=4.0, place_back=True):
     pose = _grasp_pose_from(g, scene, const)
     row.update(score=round(g.score, 3), angle_deg=round(g.angle_deg(), 1),
                width_mm=round(g.width * 1000, 1))
-    out = execute_grasp(node, pose, g.width * 1000 + 8, force, const, rclpy)
+    out = execute_grasp(node, pose, force, const, rclpy)
     row.update(out)
     return row    # execute_grasp already placed the object back gently at the grasp spot

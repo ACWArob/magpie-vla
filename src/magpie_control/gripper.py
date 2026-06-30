@@ -388,11 +388,11 @@ class Gripper:
 
 
     def theta_limit(self, delta_theta):
-        Motor1_theta = -delta_theta + self.Motor1theta_90
-        Motor2_theta = delta_theta + self.Motor2theta_90
-        if (Motor1_theta > self.Motor1theta_max or  Motor1_theta < self.Motor1theta_min):
+        Motor1_theta = -delta_theta + self.Finger1theta_90
+        Motor2_theta = delta_theta + self.Finger2theta_90
+        if (Motor1_theta > self.Finger1theta_max or Motor1_theta < self.Finger1theta_min):
             return 1
-        if (Motor2_theta > self.Motor2theta_max or  Motor2_theta < self.Motor2theta_min):
+        if (Motor2_theta > self.Finger2theta_max or Motor2_theta < self.Finger2theta_min):
             return 1
         return 0
 
@@ -497,7 +497,6 @@ class Gripper:
         return y_fingertip
 
     def apply_to_fingers(self, action_func_name, arg, finger='both', noarg=False):
-        arg = () if noarg else (arg)
         if finger == 'both':
             if noarg:
                 return [getattr(self.Finger1, action_func_name)(),

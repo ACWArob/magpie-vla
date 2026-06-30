@@ -284,13 +284,53 @@ class UR5_Interface:
         sched.run()
 
 
+    def _clear_stuck_script( self ):
+        """Stop a leftover RTDE control script via the dashboard (port 29999) and clear
+        any popups, so a fresh RTDEControlInterface can upload. A previous ur5_node that
+        was hard-killed (the launch cell uses `pkill -9`) never runs its clean shutdown,
+        so its control script stays 'running' on the robot and the next connect fails with
+        "Failed to start control script" — which used to need a controller power-cycle.
+        Best-effort; never fatal."""
+        try:
+            import dashboard_client
+            db = dashboard_client.DashboardClient( self.robotIP )
+            db.connect()
+            for fn in ('stop', 'closeSafetyPopup', 'closePopup'):
+                try:
+                    getattr(db, fn)()
+                except Exception:
+                    pass
+            db.disconnect()
+            sleep(0.5)
+        except Exception as e:
+            print(f"  [ur5] dashboard clear skipped: {e}")
+
     def start( self ):
         """ Connect to RTDE and the gripper """
         # try:
         _flags = (rtde_control.RTDEControlInterface.FLAG_UPLOAD_SCRIPT |
                   rtde_control.RTDEControlInterface.FLAG_UPPER_RANGE_REGISTERS)
-        self.ctrl = rtde_control.RTDEControlInterface( self.robotIP, flags=_flags )
+        # Clear any stuck script from a previously hard-killed node, then retry the
+        # connect, so we don't have to restart the controller on every relaunch.
+        self._clear_stuck_script()
+        last_err = None
+        for _attempt in range(3):
+            try:
+                self.ctrl = rtde_control.RTDEControlInterface( self.robotIP, flags=_flags )
+                break
+            except RuntimeError as e:
+                last_err = e
+                print(f"  [ur5] control-script start failed (try {_attempt+1}/3): {e}")
+                self._clear_stuck_script()
+                sleep(1.0)
+        else:
+            raise RuntimeError(f"UR5 control script would not start after 3 tries: {last_err}")
         self.recv = rtde_receive.RTDEReceiveInterface( self.robotIP, self.freq )
+        # Pin the robot TCP to the flange (zero offset). This code does all gripper-tip
+        # math in software (magpie_tooltip), so it assumes getActualTCPPose() == flange.
+        # A controller restart can load an installation with a non-zero TCP offset, which
+        # silently shifts node.tcp (and TABLE_Z / grasp depth). Force it to zero each start.
+        self.ctrl.setTcp( [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] )
         self.home = self.getPose()
         if self.provide_gripper: 
             self.start_gripper()
@@ -463,14 +503,14 @@ class UR5_Interface:
             raise ValueError("frame must be either 'base' or 'wrist'")
         if frame=="wrist": delta[2] += z_offset
         T = sm.SE3(delta).A
-        wrist = np.array(self.getPose()) 
+        wrist = np.array(self.getPose())
         goal = None
         if frame=="wrist": # move w.r.t wrist frame
             goal = wrist @ T
         elif frame=="base": # move w.r.t base frame
             wrist[2, 3] += z_offset
             goal = T @ wrist
-        self.moveL(goal)
+        await asyncio.to_thread(self.moveL, goal)
 
 
     def speedL_TCP(self, wrist_speedL_cmd, linSpeed = 0.25, linAccel = 0.5, tooltip=False):

@@ -65,8 +65,6 @@ class SocketDetector(GraspDetector):
 def contact_graspnet(sock='/tmp/contact_graspnet.sock'):
     return SocketDetector('contact_graspnet', sock)
 
-def anygrasp(sock='/tmp/anygrasp.sock'):
-    return SocketDetector('anygrasp', sock)
 
 def graspgen(host='localhost', port=5556):
     """GraspGen talks ZMQ (not a Unix socket) — its server ships a ZMQ interface."""
@@ -75,6 +73,16 @@ def graspgen(host='localhost', port=5556):
     except Exception:
         from graspgen_zmq import GraspGenZMQ
     return GraspGenZMQ(host=host, port=port)
+
+
+def graspgenx(host='localhost', port=5557, gripper_name='magpie'):
+    """GraspGenX (NVlabs cross-embodiment, ICRA'26) — ONE model, any gripper. Runs the
+    MAGPIE gripper zero-shot via the Correll-lab swept-volume def. ZMQ server on 5557."""
+    try:
+        from grasp_detectors.graspgenx_zmq import GraspGenXZMQ
+    except Exception:
+        from graspgenx_zmq import GraspGenXZMQ
+    return GraspGenXZMQ(host=host, port=port, gripper_name=gripper_name)
 
 
 def gsnet(image='gsnet:latest', weights='~/GSNetModels/graspness_realsense.tar'):

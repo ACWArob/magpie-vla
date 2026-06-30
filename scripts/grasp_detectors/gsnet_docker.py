@@ -71,7 +71,9 @@ class GSNetDocker(GraspDetector):
         wdir = os.path.dirname(self.weights)
         wname = os.path.basename(self.weights)
         inner = (
-            f'docker run --rm --gpus all --ipc=host '
+            # legacy nvidia runtime (this host's CDI spec mounts a missing MPS binary,
+            # so `--gpus all` fails; --runtime=nvidia + NVIDIA_VISIBLE_DEVICES is the path)
+            f'docker run --rm --runtime=nvidia -e NVIDIA_VISIBLE_DEVICES=all --ipc=host '
             # pointnet2_utils.py does `import pytorch_utils` (a sibling in /code/pointnet2),
             # so put that dir on PYTHONPATH (more robust than baking a sys.path line).
             f'-e PYTHONPATH=/code/pointnet2:/code/utils:/code '
