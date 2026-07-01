@@ -368,7 +368,9 @@ def smart_grasp_angle(pca_result, object_name='', image_rgb=None,
                 contents=[
                     gtypes.Part.from_bytes(data=img_bytes, mime_type='image/jpeg'),
                     prompt,
-                ])
+                ],
+                config=gtypes.GenerateContentConfig(
+                    thinking_config=gtypes.ThinkingConfig(thinking_budget=0)))
             word = r.text.strip().lower().split()[0]
             if word in ('symmetric', 'short_side', 'long_side'):
                 reason = f'gemini: {word} (ratio={ratio:.2f})'
@@ -507,7 +509,9 @@ def verify_grasp_angle_visual(image_rgb, cen_world, angle_deg, tcp, tcp_to_cam,
         txt = gemini_client.models.generate_content(
             model=gemini_model,
             contents=[gtypes.Part.from_bytes(data=buf.tobytes(),
-                                             mime_type='image/jpeg'), prompt]).text
+                                             mime_type='image/jpeg'), prompt],
+            config=gtypes.GenerateContentConfig(
+                thinking_config=gtypes.ThinkingConfig(thinking_budget=0))).text
     except Exception as e:
         return float(angle_deg), 'skipped', f'gemini failed: {e}', vis
 
@@ -594,7 +598,9 @@ def compare_grasp_angles_visual(image_rgb, cen_world, angle_a_deg, angle_b_deg,
         txt = gemini_client.models.generate_content(
             model=gemini_model,
             contents=[gtypes.Part.from_bytes(data=buf.tobytes(),
-                                             mime_type='image/jpeg'), prompt]).text
+                                             mime_type='image/jpeg'), prompt],
+            config=gtypes.GenerateContentConfig(
+                thinking_config=gtypes.ThinkingConfig(thinking_budget=0))).text
     except Exception as e:
         return float(angle_a_deg), label_a, f'gemini failed: {e}', vis
 
@@ -634,64 +640,58 @@ def rank_grasp_angles_visual(image_rgb, cen_world, candidates, tcp, tcp_to_cam, 
     import cv2
     from google.genai import types as gtypes
 
-    COLOURS = [(0, 200, 0), (255, 80, 0), (0, 180, 255), (200, 0, 200)]  # G O C M (BGR)
     LETTERS = ['A', 'B', 'C', 'D']
+    cands = list(candidates[:4])
 
     center_px = None
     if mask is not None and np.asarray(mask).any():
         _ys, _xs = np.where(np.asarray(mask))
         center_px = (float(_xs.mean()), float(_ys.mean()))
 
-    def _axis_pts(angle):
-        a = np.radians(angle)
-        d = np.array([np.cos(a), np.sin(a), 0.]) * half_len_m
-        return project_world_to_pixel(
-            np.array([cen_world, cen_world - d, cen_world + d]), tcp, tcp_to_cam, K_flat)
+    # Render EACH candidate as its own clean image (green closing axis + orange finger
+    # ticks), instead of overlapping thin lines on one frame — Gemini was picking
+    # "blindly" because 4 lines on a small object are unreadable. Separate annotated
+    # images per option let it actually compare where the fingers land.
+    parts = []
+    for i, (lbl, ang) in enumerate(cands):
+        _img = draw_grasp_on_image(image_rgb, cen_world, ang, tcp, tcp_to_cam, K_flat,
+                                   half_len_m=half_len_m, center_px=center_px)
+        _, _buf = cv2.imencode('.jpg', _img)
+        parts.append(gtypes.Part.from_bytes(data=_buf.tobytes(), mime_type='image/jpeg'))
+        parts.append(f'Image {i + 1} = option {LETTERS[i]} ({ang:.0f}°).')
 
-    _i = lambda p: tuple(np.round(np.asarray(p)).astype(int))
-    vis = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR).copy()
-    ctr_px = np.asarray(center_px, float) if center_px is not None else None
-
-    for idx, (lbl, ang) in enumerate(candidates[:4]):
-        col = COLOURS[idx]; letter = LETTERS[idx]
-        c_proj, p1_proj, p2_proj = _axis_pts(ang)
-        direction = p2_proj - p1_proj
-        nrm = float(np.linalg.norm(direction)) or 1.
-        ctr = ctr_px if ctr_px is not None else np.asarray(c_proj, float)
-        a1, a2 = ctr - direction / 2., ctr + direction / 2.
-        cv2.line(vis, _i(a1), _i(a2), col, 3)
-        cv2.putText(vis, f'{letter}:{ang:.0f}°', _i(a2 + direction / nrm * 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2)
-    if ctr_px is not None:
-        cv2.circle(vis, _i(ctr_px), 5, (0, 0, 255), -1)
-
-    ok, buf = cv2.imencode('.jpg', vis)
-    lines_desc = '  '.join(f'{LETTERS[i]}={lbl}({ang:.0f}°)' for i, (lbl, ang) in enumerate(candidates[:4]))
     prompt = (
-        f'A two-finger gripper will grasp the "{object_name}". '
-        f'{len(candidates[:4])} candidate CLOSING axes are shown: {lines_desc}. '
-        f'The gripper fingers press the two object faces the chosen line points at. '
-        f'Pick the line most parallel to a pair of flat opposing faces — '
-        f'gripping across the NARROWEST span between two flat faces is best. '
-        f'For a rectangular or square object, reject any diagonal that hits corners.\n'
+        f'Each image shows ONE candidate grasp for the "{object_name}". The GREEN line is '
+        f'the two-finger gripper CLOSING axis; the ORANGE ticks mark where the two fingers '
+        f'press. A GOOD grasp closes across the NARROWEST span onto two FLAT opposing faces. '
+        f'A BAD grasp runs diagonally into corners, or across the widest span. '
+        f'For a square/round top, prefer a grasp square to a pair of faces, never a diagonal. '
+        f'If several options are equally face-aligned, any of them is fine — just never pick a diagonal.\n'
         f'Reply EXACTLY:\n'
-        f'CHOICE: <{"|".join(LETTERS[:len(candidates[:4])])}>\n'
+        f'CHOICE: <{"|".join(LETTERS[:len(cands)])}>\n'
         f'ROTATE_DEG: <signed degrees to fine-tune, -15 to 15; 0 if already aligned>\n'
         f'REASON: <one sentence>'
     )
     try:
+        # thinking_budget=0: this was taking ~40s with extended reasoning that wasn't
+        # improving the pick. Disable it → ~2-3s. The clearer per-option images carry
+        # the accuracy now, not slow chain-of-thought.
         txt = gemini_client.models.generate_content(
             model=gemini_model,
-            contents=[gtypes.Part.from_bytes(data=buf.tobytes(), mime_type='image/jpeg'), prompt]).text
+            contents=parts + [prompt],
+            config=gtypes.GenerateContentConfig(
+                thinking_config=gtypes.ThinkingConfig(thinking_budget=0))).text
     except Exception as e:
-        return float(candidates[0][1]), candidates[0][0], f'gemini failed: {e}', vis
+        _fb = draw_grasp_on_image(image_rgb, cen_world, cands[0][1], tcp, tcp_to_cam,
+                                  K_flat, half_len_m=half_len_m, center_px=center_px)
+        return float(cands[0][1]), cands[0][0], f'gemini failed: {e}', _fb
 
     choice_idx, rot, reason = 0, 0., ''
     for line in txt.splitlines():
         L = line.strip(); up = L.upper()
         if up.startswith('CHOICE:'):
             c = L.split(':', 1)[1].strip().upper()
-            for k, letter in enumerate(LETTERS[:len(candidates[:4])]):
+            for k, letter in enumerate(LETTERS[:len(cands)]):
                 if c.startswith(letter):
                     choice_idx = k; break
         elif up.startswith('ROTATE_DEG:'):
@@ -700,8 +700,8 @@ def rank_grasp_angles_visual(image_rgb, cen_world, candidates, tcp, tcp_to_cam, 
         elif up.startswith('REASON:'):
             reason = L.split(':', 1)[1].strip()
 
-    chosen_lbl = candidates[choice_idx][0]
-    chosen_ang = float((candidates[choice_idx][1] + rot) % 180.)
+    chosen_lbl = cands[choice_idx][0]
+    chosen_ang = float((cands[choice_idx][1] + rot) % 180.)
     vis2 = draw_grasp_on_image(image_rgb, cen_world, chosen_ang,
                                tcp, tcp_to_cam, K_flat, half_len_m, center_px=center_px)
     return chosen_ang, chosen_lbl, reason, vis2

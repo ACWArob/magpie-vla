@@ -666,7 +666,8 @@ class Gripper:
             distance = abs(curr_aperture - prev_aperture)
             k = np.mean(avg_force) * distance * 1000.0
             k_avg.append(k)
-            gripper_vel = distance / (curr_time - prev_time)
+            _dt = curr_time - prev_time
+            gripper_vel = distance / _dt if _dt > 1e-6 else 0.0
             grasp_log.append({'timestamp': curr_time,
                               'aperture': curr_aperture,
                               'gripper_vel': gripper_vel,
@@ -744,7 +745,8 @@ class Gripper:
             distance = abs(curr_aperture - prev_aperture)
             k = np.mean(avg_force) * distance * 1000.0
             k_avg.append(k)
-            gripper_vel = distance / (curr_time - prev_time)
+            _dt = curr_time - prev_time
+            gripper_vel = distance / _dt if _dt > 1e-6 else 0.0
             grasp_log.append({
                 'timestamp': curr_time,
                 'aperture': curr_aperture,

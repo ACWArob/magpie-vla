@@ -31,6 +31,12 @@ import numpy as np
 _Q = 0.25   # process noise  (N²) — how much force varies between placements
 _R = 0.50   # measurement noise (N²) — slip-guard + placement variability
 _P0 = 4.0   # initial uncertainty (N²) — wide prior on first grasp
+# Novelty guard: a named prior is keyed on the object NAME only. Before trusting it,
+# check the object we're actually looking at matches what the prior was learned from
+# (cosine sim of DINO embeddings). Below this, treat it as a different item — same
+# name, different object (e.g. a much bigger/smaller "red block"). Same object across
+# poses/lighting usually scores 0.6–0.9; different objects 0.2–0.5. Tunable.
+_NAMED_MATCH_MIN = 0.5
 
 # ── DINO ─────────────────────────────────────────────────────────────────────
 _DINO_MODEL  = None   # lazy-loaded
@@ -89,6 +95,7 @@ class GraspMemory:
         self._priors_path = self._dir / 'force_priors.json'
         self._emb_path    = self._dir / 'embeddings.npz'
         self._orient_path = self._dir / 'orientation_log.json'
+        self._shape_path  = self._dir / 'shape_log.json'
 
         # {object_name: {x, P, n}}
         self._priors: dict = self._load_priors()
@@ -96,6 +103,12 @@ class GraspMemory:
         # {object_name: [ {angle, strategy, held, quality, ts}, ... ]}
         # Orientation outcome history — drives get_angle_advice (VLA feedback loop)
         self._orient: dict = self._load_orient()
+
+        # {object_name: [ {major, minor, height, ts}, ... ]}
+        # Per-object shape observations (mm). Same object grasped repeatedly → builds a
+        # persistent geometry "model" that's more robust than any single noisy top-down
+        # scan. Drives get_shape (sanity-check / fallback for grasp width + strategy).
+        self._shapes: dict = self._load_shapes()
 
         # Embedding store — loaded lazily
         self._emb_store: dict | None = None   # {embeddings, labels, names}
@@ -123,12 +136,28 @@ class GraspMemory:
         # 1. Named Kalman state — most accurate for known objects
         if key in self._priors:
             p = self._priors[key]
-            return {
+            out = {
                 'force_mean': p['x'],
                 'force_std':  float(np.sqrt(p['P'])),
                 'n':          p['n'],
                 'source':     'string',
+                'match_sim':  None,
+                'mismatch':   False,
             }
+            # Novelty guard: the prior is keyed on NAME only. Verify the object in
+            # front of us actually matches what this prior was learned from — a
+            # different "red block" (much bigger/smaller, different material) must NOT
+            # inherit a confident force prior. If the best visual match to this name's
+            # own stored grasps is weak, distrust it: report n=0 so the caller treats
+            # it as a new item (DeliGrasp runs, no fast-skip, no heavy memory blend).
+            if image_crop is not None and self._dino_ok:
+                sim = self._named_match(image_crop, key)
+                if sim is not None:
+                    out['match_sim'] = sim
+                    if sim < _NAMED_MATCH_MIN:
+                        out['mismatch'] = True
+                        out['n'] = 0
+            return out
 
         # 2. DINO RAG — bootstrap for truly new objects (no named prior yet)
         #    n=0 so skip-DeliGrasp never fires on a new object's first grasp
@@ -326,6 +355,114 @@ class GraspMemory:
         with open(self._orient_path, 'w') as f:
             json.dump(self._orient, f, indent=2)
 
+    def _load_shapes(self) -> dict:
+        if self._shape_path.exists():
+            with open(self._shape_path) as f:
+                return json.load(f)
+        return {}
+
+    def _save_shapes(self) -> None:
+        with open(self._shape_path, 'w') as f:
+            json.dump(self._shapes, f, indent=2)
+
+    # ── Shape model (accumulated geometry per object) ───────────────────────────
+    def record_shape(self, object_name: str, major_mm: float, minor_mm: float,
+                     height_mm: float | None = None) -> None:
+        """Log one shape observation (top-down PCA extents + height, in mm). Over many
+        grasps of the same object this accumulates into a persistent geometry model."""
+        key = object_name.lower().strip()
+        # store major >= minor so orientation in-plane doesn't scramble the stats
+        _maj, _min = (float(major_mm), float(minor_mm))
+        if _min > _maj:
+            _maj, _min = _min, _maj
+        self._shapes.setdefault(key, []).append({
+            'major':  _maj,
+            'minor':  _min,
+            'height': float(height_mm) if height_mm is not None else None,
+            'ts':     time.strftime('%Y-%m-%dT%H:%M:%S'),
+        })
+        self._shapes[key] = self._shapes[key][-50:]   # keep last 50
+        self._save_shapes()
+
+    def record_cloud(self, object_name: str, pts, held: bool | None = None,
+                     angle_deg: float | None = None) -> str | None:
+        """Persist one denoised object cloud (world frame) for later 3D-model fitting.
+
+        Stored centroid-subtracted (position factored out) but with orientation AS
+        OBSERVED — the offline fitter aligns the partial views across orientations into
+        one canonical model. One compressed .npz per grasp under
+        data/grasp_log/clouds/<object>/. Pure data hoarding; nothing reads it live yet."""
+        key = object_name.lower().strip()
+        pts = np.asarray(pts, dtype=np.float64)
+        if len(pts) < 20:
+            return None
+        ctr = pts.mean(axis=0)
+        rel = (pts - ctr).astype(np.float32)
+        d = self._dir / 'clouds' / key
+        d.mkdir(parents=True, exist_ok=True)
+        fn = d / (time.strftime('%Y%m%d_%H%M%S_%f')[:-3] + '.npz')
+        np.savez_compressed(
+            fn, points=rel, centroid=ctr.astype(np.float32),
+            held=bool(held) if held is not None else False,
+            angle_deg=float(angle_deg) if angle_deg is not None else 0.,
+            object=key)
+        return str(fn)
+
+    def count_clouds(self, object_name: str) -> int:
+        """How many partial-view clouds have been saved for this object."""
+        key = object_name.lower().strip()
+        d = self._dir / 'clouds' / key
+        return len(list(d.glob('*.npz'))) if d.exists() else 0
+
+    def record_image(self, object_name: str, image_crop, held: bool | None = None) -> str | None:
+        """Keep at least one reference image of the object in its record, so it can be
+        pulled later (Gemini comparison, human inspection) instead of re-analysing a
+        fresh frame every time. Ensures one exists ASAP; refreshes from held grasps."""
+        key = object_name.lower().strip()
+        arr = np.asarray(image_crop)
+        if arr.size == 0 or arr.ndim != 3:
+            return None
+        d = self._dir / 'object_images'
+        d.mkdir(parents=True, exist_ok=True)
+        fn = d / f'{key}.jpg'
+        if fn.exists() and not held:
+            return str(fn)            # keep existing unless we have a fresh held view
+        try:
+            import cv2
+            cv2.imwrite(str(fn), cv2.cvtColor(arr, cv2.COLOR_RGB2BGR))
+            return str(fn)
+        except Exception:
+            return None
+
+    def get_image_path(self, object_name: str) -> str | None:
+        """Path to the stored reference image for this object, or None."""
+        key = object_name.lower().strip()
+        fn = self._dir / 'object_images' / f'{key}.jpg'
+        return str(fn) if fn.exists() else None
+
+    def get_shape(self, object_name: str, min_n: int = 2) -> dict | None:
+        """Robust accumulated geometry for this object, or None if too few records.
+
+        Returns {major_mm, minor_mm, height_mm, major_std, minor_std, ratio, n}.
+        Uses medians so a single bad scan can't move the model much."""
+        key  = object_name.lower().strip()
+        hist = self._shapes.get(key, [])
+        if len(hist) < min_n:
+            return None
+        majors = np.array([h['major'] for h in hist], float)
+        minors = np.array([h['minor'] for h in hist], float)
+        heights = [h['height'] for h in hist if h.get('height') is not None]
+        maj_med, min_med = float(np.median(majors)), float(np.median(minors))
+        return {
+            'major_mm':  maj_med,
+            'minor_mm':  min_med,
+            'height_mm': float(np.median(heights)) if heights else None,
+            'major_std': float(np.std(majors)),
+            'minor_std': float(np.std(minors)),
+            'ratio':     maj_med / max(min_med, 1e-6),
+            'n':         len(hist),
+        }
+
     # ── Internal ──────────────────────────────────────────────────────────────
 
     def _embed(self, image_crop: np.ndarray) -> np.ndarray:
@@ -335,6 +472,20 @@ class GraspMemory:
             except Exception:
                 pass
         return _embed_histogram(image_crop)
+
+    def _named_match(self, image_crop: np.ndarray, key: str) -> float | None:
+        """Max cosine similarity between the current crop and the grasp embeddings
+        stored under `key`. Used to sanity-check a named prior against the object we
+        actually see. None if no embeddings exist for this name yet."""
+        store = self._load_emb_store()
+        if store is None or len(store['labels']) == 0:
+            return None
+        sel = store['names'] == key
+        if not sel.any():
+            return None
+        emb  = self._embed(image_crop)
+        sims = store['embeddings'][sel] @ emb   # embeddings are L2-normed → cosine
+        return float(sims.max())
 
     def _rag_lookup(self, image_crop: np.ndarray, store: dict,
                     k: int = 5) -> dict | None:

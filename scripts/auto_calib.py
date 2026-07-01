@@ -51,7 +51,11 @@ def auto_calibrate(node, sam3_query, object_name, step=0.03, z_off=0.120, verbos
             return None, None
         ys, xs = np.where(m)
         vd = node.depth.copy()[m].astype(float); vd = vd[vd > 0]
-        d = float(np.median(vd)) / 1000. if len(vd) else 0.4
+        # Depth under the mask anchors the whole clocking solve (Pcam below). If it's
+        # dropped out (reflective surface, occlusion), DON'T silently assume 40cm —
+        # that would solve the calibration against a wrong distance and corrupt
+        # _TCP_TO_CAM for the rest of the session. Signal "no depth" so the caller bails.
+        d = float(np.median(vd)) / 1000. if len(vd) else None
         return np.array([float(xs.mean()), float(ys.mean())]), d
 
     node.spin(20)
@@ -62,6 +66,10 @@ def auto_calibrate(node, sam3_query, object_name, step=0.03, z_off=0.120, verbos
     p0, d0 = opx()
     if p0 is None:
         raise RuntimeError(f'auto_calibrate: "{object_name}" not detected at start')
+    if d0 is None:
+        raise RuntimeError(f'auto_calibrate: no valid depth under "{object_name}" mask at '
+                           'the calibration anchor — reposition the object or check for a '
+                           'reflective surface. Refusing to calibrate against a guessed distance.')
 
     tX = home.copy(); tX[0, 3] += step
     node.move(tX, spd=0.05); time.sleep(0.3); pX, _ = opx(); node.move(home, spd=0.05)

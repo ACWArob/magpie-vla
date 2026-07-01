@@ -434,7 +434,15 @@ class UR5_Interface:
         """
         if self.record:
             self.recv.startFileRecording(self.record_path, ["timestamp", "actual_q", "actual_TCP_pose"])
-        self.ctrl.moveL( homog_coord_to_pose_vector( poseMatrix ), linSpeed, linAccel, asynch )
+        _ok = self.ctrl.moveL( homog_coord_to_pose_vector( poseMatrix ), linSpeed, linAccel, asynch )
+        # In synchronous mode RTDE returns False when the pose is unreachable / hits a
+        # singularity, and the arm simply doesn't move. Don't swallow that — raise so the
+        # caller (e.g. the pickup cell) sees a real failure instead of silently grasping
+        # from the old pose. In async mode the return is "command accepted", not motion
+        # outcome, so we don't gate on it.
+        if not asynch and _ok is False:
+            raise RuntimeError('moveL failed: target pose unreachable or singular '
+                               '(RTDE returned False) — arm did not move')
         self.move_cb()
 
 
