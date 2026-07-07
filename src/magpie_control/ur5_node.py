@@ -20,7 +20,7 @@ from magpie_control import poses
 # time: duration each call blocks (s) — match your publish rate (0.002 = 500 Hz)
 # lookahead_time: smoothing window (s), valid range [0.03, 0.2]
 # gain: proportional position gain, valid range [100, 2000]; higher = stiffer
-_SERVO_TIME        = 0.002
+_SERVO_TIME        = 0.1    # matches the 10Hz policy stream — at 0.002 the arm moved in 2ms bursts then froze 98ms (stutter)
 _SERVO_LOOKAHEAD   = 0.1
 _SERVO_GAIN        = 300
 

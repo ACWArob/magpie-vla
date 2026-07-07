@@ -91,7 +91,9 @@ class UR5_Interface:
         self.recv       = None # -- `RTDEReceiveInterface` object
         self.gripper    = None # -- Gripper Controller Interface
         self.ft_sensor = None
-        self.Q_safe     = [ radians( elem ) for elem in [ 60.83, -59.1, 61.07, 269.23, -89.73, 152.88 ] ]
+        # Safe pose = the user's working overhead scan pose (captured live 2026-07-06).
+        # The old factory pose parked the arm far from the workspace after move_safe.
+        self.Q_safe     = [ radians( elem ) for elem in [ 61.14, -74.15, 79.14, 266.2, -89.72, 153.18 ] ]
         self.torqLim    = 600
         self.freq       = freq
         self.record     = record

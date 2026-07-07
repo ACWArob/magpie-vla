@@ -9,3 +9,4 @@ __pycache__/
 data/
 *.rrd
 *.tar
+models/
