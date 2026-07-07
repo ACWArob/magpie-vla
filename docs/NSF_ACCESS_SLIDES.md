@@ -253,3 +253,109 @@ Results back:        rsync ~/<RESULTS>/  →  local
 >   (boxes + arrows), not as plain code text.
 > - Do not add, remove, or reorder slides. Do not summarize away details — this is a
 >   hands-on tutorial deck, the specifics ARE the content.
+
+---
+---
+
+# 📋 APPENDIX — General Runbook Template (handout, not part of the slide deck)
+
+> Copy this section, find-and-replace the `<PLACEHOLDERS>`, and it becomes YOUR project's
+> cluster runbook. The V0 robot-project instance of this exact template lives at
+> `docs/NSF_TRAINING.md` — use it as a filled-in reference.
+
+**Fill these in once:**
+
+| Placeholder | Yours | Example (our project) |
+|---|---|---|
+| `<LOGIN_HOST>` | | `dtai-login.delta.ncsa.illinois.edu` |
+| `<USERNAME>` | | `aabid` |
+| `<ACCOUNT>` (run `accounts`) | | `bgcd-dtai-gh` |
+| `<PARTITION>` | | `ghx4` |
+| `<PYTORCH_MODULE>` | | `python/miniforge3_pytorch/2.7.0` |
+| `<DATA_DIR>` | | `lerobot_v0` (387 MB) |
+| `<PKGS>` | | `lerobot==0.4.4` |
+| `<TRAIN_CMD>` | | `python -m lerobot.scripts.lerobot_train ...` |
+| `<JOB_NAME>` | | `act_v0` |
+
+## 0. Sanity-check your data locally
+```bash
+<one command that proves your dataset is complete and loadable>
+```
+Never debug a broken dataset through a queue.
+
+## 1. Push the data
+```bash
+rsync -avz --progress <LOCAL_DATA_PATH>/ <USERNAME>@<LOGIN_HOST>:~/<DATA_DIR>/
+```
+First connection: accept the host key, then password + 2FA. Re-runs are incremental.
+
+## 2. One-time environment (on the login node)
+```bash
+ssh <USERNAME>@<LOGIN_HOST>
+module avail python pytorch cuda        # discover what the site maintains
+module purge
+module load <PYTORCH_MODULE>            # site module = the compiled GPU stack
+module load cuda                        # CUDA runtime libs (e.g. libcufile)
+python -m venv --system-site-packages ~/<JOB_NAME>_env
+source ~/<JOB_NAME>_env/bin/activate
+pip install --upgrade pip
+pip install <PKGS>                      # PIN versions that touch your data format
+pip uninstall -y torch torchvision      # evict any CPU wheel pip snuck in (ARM machines!)
+python -c "import torch; print(torch.version.cuda)"   # must NOT print None
+```
+
+## 3. Smoke-test the exact job code path (5 seconds, saves a night)
+```bash
+python -c "<load ONE sample of your data through YOUR library>"
+```
+If this passes and CUDA is visible, ~90% of first-job failures are eliminated.
+
+## 4. The job script (`~/<JOB_NAME>.slurm`)
+```bash
+#!/usr/bin/env bash
+#SBATCH --account=<ACCOUNT>
+#SBATCH --partition=<PARTITION>
+#SBATCH --gpus-per-node=1
+#SBATCH --job-name=<JOB_NAME>
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=64G
+#SBATCH --time=<HH:MM:SS>
+#SBATCH --output=<JOB_NAME>_%j.log
+set -euo pipefail
+module purge
+module load <PYTORCH_MODULE>
+module load cuda
+source ~/<JOB_NAME>_env/bin/activate
+<TRAIN_CMD>            # include: checkpoint-every-N + disable any hub/cloud upload defaults
+```
+
+## 5. Submit + confirm it's actually running
+```bash
+sbatch ~/<JOB_NAME>.slurm
+squeue -u $USER                 # want "R"; "PD" = queued (fine, it starts without you)
+tail -f <JOB_NAME>_*.log        # WAIT for real progress lines before walking away
+```
+
+## 6. Bring results home (from your machine)
+```bash
+rsync -avz <USERNAME>@<LOGIN_HOST>:~/<RESULTS_DIR>/ <LOCAL_RESULTS>/
+<one command that proves the artifact loads locally>
+```
+
+## Troubleshooting (general — each row was a real failure)
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Could not resolve hostname` | guessed login host | user guide has the real one |
+| `Host key verification failed` | first connect from a script | ssh once by hand, answer `yes` |
+| `no matching distribution` | ancient system Python | `module load` a modern python |
+| GPU check prints `None` | pip installed a CPU wheel (common on ARM) | uninstall it; module torch takes over |
+| missing API/attribute errors | newest module too new | try an OLDER module version |
+| `libXXX.so not found` | toolkit module not loaded | `module load cuda` (or equivalent) |
+| `Invalid account` on sbatch | wrong account string | run `accounts`, copy exactly |
+| job dies in seconds | framework default needs a flag (e.g. hub upload) | read the traceback, add the flag |
+| stuck `PD` for hours | queue busy / walltime too long | shorter `--time`, resubmit |
+| OOM during run | batch too big | halve the batch size |
+
+## Iterating
+More data later → re-run step 1 (rsync sends only new files) → resubmit with a fresh
+`--output_dir` so runs never overwrite each other.
