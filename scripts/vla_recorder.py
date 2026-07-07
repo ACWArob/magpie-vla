@@ -143,8 +143,13 @@ class _RecorderNode:
 class VLARecorder:
     def __init__(self, node, root='~/magpie_control/data/lerobot_magpie',
                  repo_id='magpie/grasp', fps=10, cam='wrist', own_node=True,
-                 rerun=None):
+                 rerun=None, trim_static=False):
         self.node     = node          # kernel node (fallback source)
+        # trim_static: drop long runs of stationary frames (arm idle during model compute)
+        # at end_episode — the idle gap otherwise teaches the policy that hovering is an
+        # action (V0 post-grasp dithering). Keeps up to _STATIC_KEEP consecutive static
+        # frames so short, real pauses survive.
+        self.trim_static = bool(trim_static)
         self.own_node = own_node      # use a dedicated ROS recorder node (robust)
         self.rerun    = rerun         # None | 'web' | 'spawn' | 'connect' | 'save'
         self._rr      = None
@@ -337,10 +342,38 @@ class VLARecorder:
             if slp > 0:
                 time.sleep(slp)
 
+    _STATIC_KEEP = 5     # max consecutive static frames kept (0.5s at 10Hz)
+
+    def _trim_static_frames(self):
+        """Drop frames where BOTH the state and the declared action are unchanged vs the
+        previous kept frame, once more than _STATIC_KEEP such frames run consecutively.
+        Removes the arm-idle model-compute gap while preserving short genuine pauses."""
+        if len(self._buf) < 3:
+            return
+        kept, static_run = [self._buf[0]], 0
+        for img, st, ac in self._buf[1:]:
+            _, pst, pac = kept[-1]
+            moved = (np.linalg.norm(st[:3] - pst[:3]) > 5e-4          # >0.5mm TCP motion
+                     or abs(st[6] - pst[6]) > 0.5                      # gripper moving
+                     or np.linalg.norm(ac - pac) > 1e-3)               # action changed
+            if moved:
+                static_run = 0
+                kept.append((img, st, ac))
+            else:
+                static_run += 1
+                if static_run <= self._STATIC_KEEP:
+                    kept.append((img, st, ac))
+        dropped = len(self._buf) - len(kept)
+        if dropped:
+            print(f'  [VLA] trimmed {dropped} static frames ({len(self._buf)} -> {len(kept)})')
+        self._buf = kept
+
     def end_episode(self):
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=2.)
+        if self.trim_static:
+            self._trim_static_frames()
         n = len(self._buf)
         if n > 1:
             tcp = np.array([b[1][:3] for b in self._buf])
