@@ -2,7 +2,50 @@
 
 Autonomous grasping stack for the UR5 + MAGPIE gripper. Detects any object by name, computes a force-controlled grasp using physics-based parameters (DeliGrasp via Gemini), and adapts in real-time using depth-based slip detection and a persistent Kalman-filtered grasp memory that improves with each attempt. Logs full VLA training data including a Gemini-based grasp quality reward signal.
 
-Grasp pose planning runs both **PCA** (point-cloud principal axes) and **GraspGenX** (NVlabs cross-embodiment 6-DOF grasp model) in parallel, with Gemini arbitrating across all candidates. See [docs/pickup_pipeline.md](docs/pickup_pipeline.md) for the current `notebooks/magpie_collect.ipynb`-based pickup pipeline, including the GraspGenX/SAM3 VRAM coexistence design. **Policy training (V0, July 2026):** episodes collected here train an ACT policy on NSF ACCESS (NCSA DeltaAI) — see [docs/NSF_TRAINING.md](docs/NSF_TRAINING.md) for the full reproducible runbook and [docs/NSF_ACCESS_SLIDES.md](docs/NSF_ACCESS_SLIDES.md) for a general presentation template; the trained policy deploys on the arm via [notebooks/v0_test.ipynb](notebooks/v0_test.ipynb) (10 Hz closed-loop, safety envelope). Latest results + V1 plan: [tests/July_7_Update.md](tests/July_7_Update.md). The diagram and cell names below describe the original `magpie_demo.ipynb` walkthrough.
+Grasp pose planning runs both **PCA** (point-cloud principal axes) and **GraspGenX** (NVlabs cross-embodiment 6-DOF grasp model) in parallel, with a deterministic **flat-face angle contract** having the final word (see below). See [docs/pickup_pipeline.md](docs/pickup_pipeline.md) for the pickup pipeline internals, including the GraspGenX/SAM3 VRAM coexistence design. The diagram and cell names below describe the original `magpie_demo.ipynb` walkthrough.
+
+---
+
+## Policy training pipeline (V0 → V1, July 2026)
+
+The scripted pipeline above doubles as a **MimicGen-style data generator** for training
+end-to-end policies. The full loop — collect on the arm → train on NSF ACCESS → deploy →
+measure → improve the data — closed in July 2026:
+
+```
+DEFINE support → CONTRACT consistency → COVER (grid) → GATE+AUDIT → train → MAP (heat-map) → FILL
+```
+*(the 6-step method: [docs/DATA_STANDARD.md](docs/DATA_STANDARD.md))*
+
+| Stage | Notebook / doc |
+|---|---|
+| **V0 collection** (random scatter, 60 eps) | [notebooks/v0_collect.ipynb](notebooks/v0_collect.ipynb) |
+| **V1 collection** (5×5 grid × 7 angles, aperture-mm actions, angle contract, ~225 eps) | [notebooks/v1_collect.ipynb](notebooks/v1_collect.ipynb) |
+| **Training on NSF ACCESS (DeltaAI)** — validated runbook, ARM pitfalls, slurm job | [docs/NSF_TRAINING.md](docs/NSF_TRAINING.md) · slides template: [docs/NSF_ACCESS_SLIDES.md](docs/NSF_ACCESS_SLIDES.md) |
+| **Deployment** — 10 Hz closed-loop ACT with safety envelope | [notebooks/v0_test.ipynb](notebooks/v0_test.ipynb) |
+| **Results & analysis** | [docs/V0_ANALYSIS.md](docs/V0_ANALYSIS.md) · [tests/July_7_Update.md](tests/July_7_Update.md) · research: [docs/V1_data_research.md](docs/V1_data_research.md) |
+
+**V0 result:** 60 episodes → ACT (51.6M) trained in 62 min on one GH200 (~1 GPU-hour) →
+**autonomous picks on the real arm the same day** (visual reach, self-rotation, grasp, lift).
+Offline replay error 1.9 mm — the model was never the bottleneck; the data was.
+
+**What V0's data got wrong (and V1 fixes)** — full post-mortem in
+[docs/V0_ANALYSIS.md](docs/V0_ANALYSIS.md):
+
+![angle collapse](docs/figures/v0/fig1_angle_collapse.png)
+
+*71% of V0 grasps executed at ~90° despite uniformly random block angles → the deployed
+policy froze on rotated blocks (imitation averages conflicting modes). V1 enforces a
+deterministic flat-face angle contract and gates on measured deviation.*
+
+![support vs grid](docs/figures/v0/fig2_support_vs_grid.png)
+
+*Policy competence stopped at the edge of the data support (interpolation-only
+generalization). V1 replaces random scatter with systematic grid coverage — and evaluates
+on the same grid, producing a per-cell success heat-map.*
+
+---
+
 
 ---
 
