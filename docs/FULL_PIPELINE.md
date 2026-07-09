@@ -259,6 +259,62 @@ NOT fine-tuning. Only the vision backbone (ResNet18) starts from ImageNet weight
 ignores the task string (it's recorded for future VLA compatibility). ~33 epochs over the
 dataset at 100k steps / batch 8.
 
+### 5.1.1 The policy itself — exact I/O and architecture (act_v1 config)
+
+**Inputs** (one observation per 10 Hz tick):
+- `observation.images.wrist` — RGB 3×480×848 from the D435i (the only camera)
+- `observation.state` — 9-dim: `[x, y, z, rx, ry, rz, grip_mm, grip_force, wrist_fz]`
+
+**Output**: a **chunk of 100 future actions** (`chunk_size=100`), each 7-dim:
+`[target x, y, z, rx, ry, rz, grip]` — for V1 `grip` is **aperture in mm** (V0: binary 0/1).
+Actions are *declared waypoint targets* (§4.1), so a predicted action is "where the arm
+should be heading," not a velocity.
+
+**Architecture** (ACT = Action Chunking Transformer, CVAE variant; 51.6M params, ~197 MB):
+- **Vision**: ResNet18 backbone (ImageNet-pretrained, fine-tuned during training) → feature
+  map → flattened tokens with sinusoidal position embeddings.
+- **Transformer**: encoder 4 layers / decoder 1 layer, `dim_model=512`, 8 heads,
+  feedforward 3200. Decoder cross-attends vision tokens + state token + latent token and
+  emits the 100-action chunk in one shot (no autoregression → single forward pass, 6–7 ms
+  on the RTX 2070).
+- **CVAE**: a 4-layer VAE encoder (training only) compresses the ground-truth action chunk
+  into a 32-dim latent `z`; the decoder is conditioned on it. At inference `z=0` (the
+  distribution mean). Purpose: absorb demonstrator style variation so the deterministic
+  decode is clean — with a scripted expert there's little style variance, but it also mops
+  up jitter.
+- **Loss**: L1 reconstruction on the action chunk + KL regularizer (`kl_weight=10`),
+  lr 1e-5, AdamW.
+
+**What is actually learned vs. fixed**:
+| Component | Trained? |
+|---|---|
+| ResNet18 vision backbone | fine-tuned (starts from ImageNet) |
+| Transformer encoder/decoder, action head, VAE encoder | from scratch |
+| Normalization statistics | **not learned** — computed from the dataset (mean/std per feature) and frozen into the pre/post processors |
+| Task string | ignored by ACT entirely |
+
+**Normalization is part of the model**: the pre-processor normalizes image/state with the
+*training dataset's* statistics; the post-processor un-normalizes predicted actions back to
+metres/radians/mm. This is WHY V0 and V1 data can't be mixed (a 0/1 grip channel and a
+20–104 mm grip channel produce nonsense shared statistics), and why the processor files must
+travel with the weights.
+
+**What training outputs** (pulled back to `models/act_<tag>/`):
+```
+config.json            — architecture + I/O shapes (everything quoted above)
+model.safetensors      — the 51.6M weights (~197 MB)
+policy_preprocessor.json  + …normalizer_processor.safetensors    — input normalization stats
+policy_postprocessor.json + …unnormalizer_processor.safetensors  — action un-normalization
+train_config.json      — full training provenance (dataset, steps, seed, lr schedule)
+```
+Plus per-`save_freq` checkpoints (`010000/`…`150000/`, `last` symlink) left on the cluster.
+
+**Chunking at deploy time**: trained `chunk_size=100` (10 s of actions), but deployment
+overrides `n_action_steps=10` — execute only the first 1 s of each predicted chunk, then
+re-infer with fresh observations (§6.1: chosen over temporal ensembling, which corrupts
+rotation vectors). The config on disk says `n_action_steps=100`; every deploy cell sets it
+to 10 at load time.
+
 ### 5.2 Where — options explored
 
 | Option | Verdict |
