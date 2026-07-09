@@ -15,7 +15,9 @@ measure → improve the data — closed in July 2026:
 ```
 DEFINE support → CONTRACT consistency → COVER (grid) → GATE+AUDIT → train → MAP (heat-map) → FILL
 ```
-*(the 6-step method: [docs/DATA_STANDARD.md](docs/DATA_STANDARD.md))*
+*(the 6-step method: [docs/DATA_STANDARD.md](docs/DATA_STANDARD.md) · **the complete
+end-to-end record — every stage, option explored, and failure→fix:
+[docs/FULL_PIPELINE.md](docs/FULL_PIPELINE.md)**)*
 
 | Stage | Notebook / doc |
 |---|---|
