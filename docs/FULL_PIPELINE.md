@@ -3,7 +3,8 @@
 *Everything, end to end: hardware → scripted expert → data → training → deployment → evaluation
 → automation. Every option we explored, what we chose, and why. Last updated 2026-07-09.*
 
-*Companion docs: [pickup_pipeline.md](pickup_pipeline.md) (scripted-expert internals),
+*Companion docs: [DECISION_LEDGER.md](DECISION_LEDGER.md) (every fork + quantified rejection reasons),
+[pickup_pipeline.md](pickup_pipeline.md) (scripted-expert internals),
 [DATA_STANDARD.md](DATA_STANDARD.md) (the 6-step data method), [V0_ANALYSIS.md](V0_ANALYSIS.md)
 (V0 post-mortem), [V1_data_research.md](V1_data_research.md) (literature review),
 [V0_V1_COMPARISON.md](V0_V1_COMPARISON.md) (measured comparison),
