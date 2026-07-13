@@ -1,0 +1,605 @@
+<title>MAGPIE Pipeline — Step-by-Step Map</title>
+<style>
+  :root{
+    --bg:#f2f4f6; --card:#ffffff; --ink:#1b2430; --mut:#5a6b7c; --line:#d4dbe2;
+    --spine:#9fb0c0; --accent:#d9560b; --accent-ink:#ffffff;
+    --ok:#1e7a46; --ok-bg:#e5f3ea; --bad:#bb3a3a; --bad-bg:#f9e9e9;
+    --warn:#8a6410; --warn-bg:#f7efd8; --chip:#eaeef2; --code:#243040; --code-ink:#d7e2ec;
+    --mono:ui-monospace,'Cascadia Code','JetBrains Mono',Menlo,Consolas,monospace;
+    --sans:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+  }
+  @media (prefers-color-scheme: dark){:root{
+    --bg:#12161b; --card:#1a2027; --ink:#e4eaf0; --mut:#93a3b2; --line:#2b343e;
+    --spine:#45525f; --accent:#f0691a; --accent-ink:#16110c;
+    --ok:#5cc98a; --ok-bg:#16301f; --bad:#e08585; --bad-bg:#341919;
+    --warn:#d9b24a; --warn-bg:#2e2712; --chip:#242c35; --code:#0d1218; --code-ink:#b8c7d4;
+  }}
+  :root[data-theme="dark"]{
+    --bg:#12161b; --card:#1a2027; --ink:#e4eaf0; --mut:#93a3b2; --line:#2b343e;
+    --spine:#45525f; --accent:#f0691a; --accent-ink:#16110c;
+    --ok:#5cc98a; --ok-bg:#16301f; --bad:#e08585; --bad-bg:#341919;
+    --warn:#d9b24a; --warn-bg:#2e2712; --chip:#242c35; --code:#0d1218; --code-ink:#b8c7d4;
+  }
+  :root[data-theme="light"]{
+    --bg:#f2f4f6; --card:#ffffff; --ink:#1b2430; --mut:#5a6b7c; --line:#d4dbe2;
+    --spine:#9fb0c0; --accent:#d9560b; --accent-ink:#ffffff;
+    --ok:#1e7a46; --ok-bg:#e5f3ea; --bad:#bb3a3a; --bad-bg:#f9e9e9;
+    --warn:#8a6410; --warn-bg:#f7efd8; --chip:#eaeef2; --code:#243040; --code-ink:#d7e2ec;
+  }
+  html,body{background:var(--bg);color:var(--ink);font-family:var(--sans);margin:0}
+  .wrap{max-width:880px;margin:0 auto;padding:40px 20px 90px}
+  header{margin-bottom:14px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--accent);font-weight:700}
+  h1{font-size:clamp(24px,4vw,34px);line-height:1.15;margin:6px 0 8px;text-wrap:balance}
+  .sub{color:var(--mut);max-width:62ch;margin:0 0 18px;line-height:1.5}
+  .legend{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 28px}
+  .lg{font-family:var(--mono);font-size:11.5px;padding:4px 10px;border-radius:999px;border:1px solid var(--line);background:var(--card)}
+  .lg b{font-weight:700}
+  .lg.gate b{color:var(--accent)} .lg.loop b{color:var(--mut)} .lg.hw b{color:var(--warn)}
+  .map{background:var(--code);color:var(--code-ink);border-radius:8px;padding:16px 18px;overflow-x:auto;margin:0 0 40px}
+  .map pre{margin:0;font-family:var(--mono);font-size:12.5px;line-height:1.55}
+  /* phase header */
+  .phase{margin:44px 0 18px;display:flex;align-items:baseline;gap:12px;border-bottom:2px solid var(--ink);padding-bottom:8px}
+  .phase .pn{font-family:var(--mono);font-weight:800;font-size:13px;letter-spacing:.1em;color:var(--accent)}
+  .phase h2{font-size:19px;margin:0}
+  .phase .freq{margin-left:auto;font-family:var(--mono);font-size:11.5px;color:var(--mut);white-space:nowrap}
+  /* spine + steps */
+  .steps{position:relative;padding-left:56px;display:flex;flex-direction:column;gap:14px}
+  .steps::before{content:"";position:absolute;left:19px;top:6px;bottom:6px;width:2px;background:var(--spine)}
+  .step{position:relative;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:13px 16px 12px}
+  .step .num{position:absolute;left:-56px;top:10px;width:40px;height:40px;border-radius:50%;
+    background:var(--card);border:2px solid var(--spine);display:flex;align-items:center;justify-content:center;
+    font-family:var(--mono);font-weight:800;font-size:14px}
+  .step.gate{border-color:var(--accent)}
+  .step.gate .num{border-color:var(--accent);color:var(--accent)}
+  .step h3{margin:0 0 4px;font-size:15px}
+  .step h3 .where{font-family:var(--mono);font-weight:400;font-size:11px;color:var(--mut);margin-left:8px}
+  .step p{margin:0;color:var(--mut);font-size:13.5px;line-height:1.55;max-width:68ch}
+  .step p b{color:var(--ink);font-weight:600}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+  .chip{font-family:var(--mono);font-size:11px;background:var(--chip);border-radius:5px;padding:3px 8px;white-space:nowrap}
+  .branches{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .br{flex:1 1 220px;border-radius:6px;padding:8px 11px;font-size:12.5px;line-height:1.45}
+  .br .tag{font-family:var(--mono);font-size:10.5px;font-weight:800;letter-spacing:.08em;display:block;margin-bottom:2px}
+  .br.yes{background:var(--ok-bg)} .br.yes .tag{color:var(--ok)}
+  .br.no{background:var(--bad-bg)} .br.no .tag{color:var(--bad)}
+  .br.alt{background:var(--warn-bg)} .br.alt .tag{color:var(--warn)}
+  .loopback{margin-top:10px;font-family:var(--mono);font-size:11.5px;color:var(--mut)}
+  .loopback b{color:var(--ink)}
+  .hwnote{margin-top:10px;background:var(--warn-bg);border-radius:6px;padding:8px 11px;font-size:12.5px;line-height:1.45}
+  .hwnote .tag{font-family:var(--mono);font-size:10.5px;font-weight:800;letter-spacing:.08em;color:var(--warn);display:block;margin-bottom:2px}
+  .handoff{margin:20px 0 0;padding-left:56px;font-family:var(--mono);font-size:12px;color:var(--mut)}
+  footer{margin-top:56px;color:var(--mut);font-size:12.5px;line-height:1.6;border-top:1px solid var(--line);padding-top:14px}
+  footer code{font-family:var(--mono);font-size:11.5px;background:var(--chip);padding:1px 5px;border-radius:4px}
+
+  /* ── clickable map ── */
+  .bigmap{border:1px solid var(--line);border-radius:10px;background:var(--card);padding:18px 18px 14px;margin:0 0 34px}
+  .bigmap .mtitle{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin:0 0 12px}
+  .mphase{display:flex;gap:10px;align-items:flex-start;padding:9px 0;border-top:1px dashed var(--line)}
+  .mphase:first-of-type{border-top:none}
+  .mphase .mp{flex:0 0 150px;font-family:var(--mono);font-size:11px;line-height:1.5;color:var(--mut);padding-top:5px}
+  .mphase .mp b{display:block;color:var(--accent);font-weight:800;letter-spacing:.08em}
+  .mnodes{display:flex;flex-wrap:wrap;gap:6px}
+  .mnode{display:inline-flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;color:var(--ink);
+    background:var(--chip);border:1px solid var(--line);border-radius:999px;padding:4px 11px 4px 4px;cursor:pointer;line-height:1.2}
+  .mnode .n{width:22px;height:22px;border-radius:50%;background:var(--card);border:2px solid var(--spine);
+    display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:10.5px;flex:0 0 22px}
+  .mnode.gate .n{border-color:var(--accent);color:var(--accent)}
+  .mnode:hover,.mnode:focus-visible{border-color:var(--accent);outline:none}
+  .mnode:focus-visible{box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 30%,transparent)}
+  @media (max-width:620px){.mphase{flex-direction:column;gap:6px}.mphase .mp{flex-basis:auto}}
+  /* ── slideshow ── */
+  body.slides #full,body.slides .bigmap,body.slides .map,body.slides header .sub,body.slides .legend{display:none}
+  #stage{display:none}
+  body.slides #stage{display:block}
+  .stg-top{display:flex;align-items:center;gap:12px;margin:0 0 6px;font-family:var(--mono);font-size:11.5px;color:var(--mut)}
+  .stg-top .ph{color:var(--accent);font-weight:800;letter-spacing:.08em}
+  .stg-bar{height:4px;background:var(--chip);border-radius:2px;margin:0 0 22px;overflow:hidden}
+  .stg-bar i{display:block;height:100%;background:var(--accent);border-radius:2px;transition:width .2s}
+  @media (prefers-reduced-motion: reduce){.stg-bar i{transition:none}}
+  #slidebox .step{padding:20px 22px}
+  #slidebox .step .num{display:none}
+  #slidebox .step h3{font-size:20px;margin-bottom:8px}
+  #slidebox .step h3::before{content:attr(data-n) " · ";color:var(--accent);font-family:var(--mono)}
+  #slidebox .step p{font-size:15px;max-width:70ch}
+  #slidebox .chip{font-size:12px}
+  #slidebox .br{font-size:13.5px}
+  .stg-nav{display:flex;gap:8px;margin-top:20px;flex-wrap:wrap}
+  .stg-nav button{font-family:var(--mono);font-size:13px;font-weight:700;border-radius:7px;border:1px solid var(--line);
+    background:var(--card);color:var(--ink);padding:10px 18px;cursor:pointer}
+  .stg-nav button.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+  .stg-nav button:hover,.stg-nav button:focus-visible{border-color:var(--accent);outline:none}
+  .stg-nav .hint{margin-left:auto;align-self:center;font-family:var(--mono);font-size:11px;color:var(--mut)}
+  .mapbtn{font-family:var(--mono);font-size:12px;font-weight:700;border-radius:7px;border:1px solid var(--accent);
+    background:var(--accent);color:var(--accent-ink);padding:8px 16px;cursor:pointer;margin:0 0 18px}
+</style>
+
+<div class="wrap">
+<header>
+  <div class="eyebrow">MAGPIE · UR5e + AX-12 gripper + D435i · LeRobot 0.4.4 · ACT 51.6M · NSF DeltaAI</div>
+  <h1>The Full Pipeline, Step by Step</h1>
+  <p class="sub">Every step from an empty table to a graded policy heat-map — 36 steps in 6 phases,
+  with every gate, retry loop, and threshold the system actually uses. Follow the numbers top to bottom;
+  orange boxes are decision gates, colored branches say where each outcome goes.
+  <b style="color:var(--ink)">Measured end-to-end result (2026-07-13): 97/100 picks — rotated blocks 75/75, all 3 failures at 0° (the predicted aliasing).</b></p>
+  <div class="legend">
+    <span class="lg gate"><b>◆ orange border</b> = decision gate</span>
+    <span class="lg loop"><b>↩</b> = loops back to an earlier step</span>
+    <span class="lg hw"><b>⚠</b> = hardware lesson baked in</span>
+  </div>
+</header>
+
+<div class="map"><pre>
+PHASE 0 SETUP ─▶ PHASE 1 SCRIPTED EXPERT (×229 episodes) ─▶ PHASE 2 AUDIT ─▶ PHASE 3 TRAIN (DeltaAI)
+   steps 1–4        steps 5–15  ↩ self-resetting loop         step 16          steps 17–22
+                                                                                     │
+        ┌────────────────────────────────────────────────────────────────────────────┘
+        ▼
+PHASE 4 DEPLOY (10 Hz control loop, steps 23–30)  ─▶  PHASE 5 EVAL (×100 combos, steps 31–36) ─▶ heat-maps
+</pre></div>
+
+<button class="mapbtn" id="startshow">▶ Start slideshow (or click any step below)</button>
+
+<nav class="bigmap" id="bigmap" aria-label="Pipeline map — click a step">
+  <p class="mtitle">The map — click any step to open it as a slide</p>
+</nav>
+
+<section id="stage" aria-live="polite">
+  <div class="stg-top"><span class="ph" id="stg-ph"></span><span id="stg-count"></span></div>
+  <div class="stg-bar"><i id="stg-fill" style="width:0%"></i></div>
+  <div id="slidebox"></div>
+  <div class="stg-nav">
+    <button id="btn-prev">← Prev</button>
+    <button id="btn-next" class="primary">Next →</button>
+    <button id="btn-map">Map</button>
+    <span class="hint">← → keys · Esc = map</span>
+  </div>
+</section>
+
+<div id="full">
+<!-- ══════════════ PHASE 0 ══════════════ -->
+<div class="phase"><span class="pn">PHASE 0</span><h2>Session setup</h2><span class="freq">once per kernel</span></div>
+<div class="steps">
+
+  <div class="step"><span class="num">1</span>
+    <h3>Launch the driver stack<span class="where">cell 1</span></h3>
+    <p>Kill any stale nodes (SIGTERM first so the UR5e releases RTDE cleanly, then SIGKILL), then spawn
+    each driver as a child of the kernel, logging to <b>/tmp/log_*.txt</b>. SAM3 is a separate
+    subprocess over a Unix socket (~90&nbsp;s boot); GraspGenX serves on ZMQ.</p>
+    <div class="chips"><span class="chip">ur5_node</span><span class="chip">gripper_node</span>
+    <span class="chip">realsense2_camera</span><span class="chip">ft_sensor_node</span>
+    <span class="chip">SAM3 → /tmp/sam3.sock</span><span class="chip">GraspGenX → :5557</span></div>
+    <div class="hwnote"><span class="tag">⚠ VRAM budget (RTX 2070, 8 GB)</span>
+    SAM3 ~4.5 GB + GraspGenX ~1.8 GB + policy ~1 GB ≈ full. Stale Jupyter kernels hold ~478 MB each —
+    kill them or the policy load OOMs.</div>
+  </div>
+
+  <div class="step"><span class="num">2</span>
+    <h3>ROS libs, imports, helper node<span class="where">cells 2–5</span></h3>
+    <p>Preload ROS shared libraries so rclpy imports inside VS Code, add <b>scripts/</b> to the path,
+    build the helper <b>node</b>: camera/depth/TCP/gripper-state/wrench subscriptions + service clients
+    for arm moves and every gripper action.</p>
+    <div class="chips"><span class="chip">/arm/tcp_pose</span><span class="chip">/gripper/state @10 Hz</span>
+    <span class="chip">/arm/move_l · /arm/stop</span><span class="chip">open/close/set_pos/set_force/clear_error</span></div>
+  </div>
+
+  <div class="step gate"><span class="num">3</span>
+    <h3>GO HOME + verified gripper reset<span class="where">GO HOME cell — run before every rollout</span></h3>
+    <p>Release servo mode (<b>/arm/stop</b> — after servoL streaming the controller refuses moveL until stopped),
+    two-stage move to the dataset home pose (vertical first, then lateral), then <b>reboot the gripper driver</b>:
+    pkill + relaunch re-runs <code>Gripper.__init__</code> → torque=200 written to both AX-12s, USB port reopened.
+    Open at 16&nbsp;N and read the aperture.</p>
+    <div class="chips"><span class="chip">HOME = median frame-0 pose of the dataset</span>
+    <span class="chip">verify: aperture &gt; 80 mm</span></div>
+    <div class="branches">
+      <div class="br yes"><span class="tag">APERTURE &gt; 80 mm</span>“open VERIFIED” → continue to step 4</div>
+      <div class="br no"><span class="tag">NOT OPEN</span>reboot once more → still shut = loud warning, human checks USB / servo horn</div>
+    </div>
+    <div class="hwnote"><span class="tag">⚠ why a reboot, not “calibrate”</span>
+    clear_error re-enables torque at <b>2 N</b> — too weak to move the fingers, so every motion after it
+    silently stalls unless force is re-asserted. The calibrate service was just open→close (AX-12 encoders
+    are absolute — nothing to re-zero). Rule: <b>never command the gripper after clear_error without set_force first.</b></div>
+  </div>
+
+  <div class="step"><span class="num">4</span>
+    <h3>One scripted pickup<span class="where">cells 7–8, block near centre</span></h3>
+    <p>Runs the full expert once: measures <b>TABLE_Z</b> from the depth cloud (feeds every z-floor),
+    and loads the pickup namespace the collector/eval will re-run via <code>run_cell</code>.</p>
+    <div class="chips"><span class="chip">TABLE_Z → z-floor = table + 231 mm gripper + 3 mm</span></div>
+  </div>
+</div>
+
+<!-- ══════════════ PHASE 1 ══════════════ -->
+<div class="phase"><span class="pn">PHASE 1</span><h2>Scripted expert — the data generator</h2><span class="freq">×229 episodes · 66.7/hr</span></div>
+<div class="steps">
+
+  <div class="step"><span class="num">5</span>
+    <h3>Next grid target from the ledger</h3>
+    <p>Coverage is <b>designed, not random</b>: 5×5 positions at 3 cm spacing × 7 angles at 15°, plus
+    jitter (±1 cm, ±5°), extra edge repetitions, and ~15% deliberate-offset recovery episodes.
+    The ledger (<b>data/v1_coverage.json</b>) makes collection resume-safe.</p>
+    <div class="chips"><span class="chip">225 combos, serpentine order</span><span class="chip">V0 comparison: random ±4 cm → 71% one angle</span></div>
+  </div>
+
+  <div class="step"><span class="num">6</span>
+    <h3>Detect the block — SAM3</h3>
+    <p>Text query → pixel-accurate mask + boxes + scores over the Unix-socket bridge.
+    Retried if nothing scores; the episode aborts if the block truly isn’t there.</p>
+    <div class="chips"><span class="chip">query: "red block"</span><span class="chip">mask → 2D PCA / minAreaRect</span></div>
+  </div>
+
+  <div class="step"><span class="num">7</span>
+    <h3>Move above + closed-loop centering</h3>
+    <p>Arm moves over the detection, then visual-servoes until the mask centroid sits under the TCP.
+    Recording starts at the <b>first manipulation move</b> — the reach is training signal too.</p>
+  </div>
+
+  <div class="step gate"><span class="num">8</span>
+    <h3>Choose the grasp angle — flat-face snap</h3>
+    <p>Segmented point cloud → <b>minAreaRect on the SAM3 mask</b> snaps the grasp perpendicular to the
+    block’s flat face. Deterministic — this replaced the Gemini angle arbiter that caused V0’s
+    42/62-at-90° angle collapse.</p>
+    <div class="branches">
+      <div class="br yes"><span class="tag">ANGLE CONSISTENT</span>proceed to step 9</div>
+      <div class="br no"><span class="tag">GEOMETRIC GATE FAILS</span>episode tagged <code>issue=angle</code> → never committed (kills action divergence)</div>
+    </div>
+    <div class="hwnote"><span class="tag">⚠ known residual: 0°/90° aliasing</span>
+    A square block at 0° and 90° is the same scene with two labels — slipped the mod-90 gate, taught the
+    policy to rotate ~43° on straight blocks. Fix queued (V1.1): canonical labels + ~35 replacement episodes.</div>
+  </div>
+
+  <div class="step"><span class="num">9</span>
+    <h3>Re-localise AT the grasp angle</h3>
+    <p>Detect again after rotating to the grasp angle, so the camera offset (frozen at scan angle) and the
+    finger offset (rotates with the grasp) <b>co-rotate and cancel</b>. This killed a systematic
+    left/right drift that flipped sides with the angle.</p>
+  </div>
+
+  <div class="step"><span class="num">10</span>
+    <h3>Descend + DeliGrasp close</h3>
+    <p>Drop to grasp height (z-floor enforced), pre-position fingers to <b>width + 8 mm</b>, then
+    DeliGrasp force closure using VLM physics priors. Up to <b>3 physical grip attempts</b> — each one
+    runs <code>grip_refresh</code>: clear_error → set_force → close (the 2 N trap, step 3, is why).</p>
+    <div class="chips"><span class="chip">aperture staircase: 104 → width+8 → 20 mm</span><span class="chip">grip force ≈ 16 N</span></div>
+  </div>
+
+  <div class="step"><span class="num">11</span>
+    <h3>Slip-guarded incremental lift</h3>
+    <p>Lift in steps, re-asserting grip between each (AX-12 torque dies after ~1–2 s of holding).
+    The slip-guard node watches depth for the object dropping and reclamps.</p>
+    <div class="chips"><span class="chip">gripper-measured width recorded (truth beats the PCD guess)</span></div>
+  </div>
+
+  <div class="step"><span class="num">12</span>
+    <h3>Recorder buffers the episode @ 10 Hz</h3>
+    <p>Wrist image + 9-dim state + 7-dim <b>declared action</b> (the expert’s waypoint targets, not
+    measured next-states — AWE-validated). <b>Episode ends at lift</b>: V0 wasted ~40% of frames on
+    carry/place and dithered after grasping.</p>
+    <div class="chips"><span class="chip">state = [xyz, rotvec, grip_mm, grip_force, wrist_fz]</span>
+    <span class="chip">action = [target xyz, rotvec, aperture_mm]</span><span class="chip">median 11.2 s (V0: 39.6 s)</span></div>
+  </div>
+
+  <div class="step gate"><span class="num">13</span>
+    <h3>THE REWARD GATE — the robot judges itself</h3>
+    <p>Commit only if <b>physically held</b> (aperture band through the lift) AND the <b>Gemini quality
+    judge scores ≥ 0.6</b> (image of the grasp, temperature 0, deterministic rubric).</p>
+    <div class="branches">
+      <div class="br yes"><span class="tag">HELD ∧ JUDGE ≥ 0.6</span>episode → <code>data/lerobot_v1</code> (the trainable set)</div>
+      <div class="br no"><span class="tag">EITHER FAILS</span>→ <code>_attempts.jsonl</code> — auditable forever, trainable never</div>
+    </div>
+    <div class="chips"><span class="chip">save rate at scale: 99.1% (231 attempts)</span><span class="chip">mean reward 0.90</span></div>
+  </div>
+
+  <div class="step"><span class="num">14</span>
+    <h3>Self-reset: place at the NEXT grid target</h3>
+    <p>The expert places the block at the next combo’s position and angle itself — no human between
+    episodes. This is what makes 66.7 episodes/hour possible.</p>
+    <div class="loopback">↩ back to <b>step 5</b> for the next combo (225×)</div>
+  </div>
+
+  <div class="step gate"><span class="num">15</span>
+    <h3>Auto-recovery (V1.1 collector)</h3>
+    <p>On a miss or crash: servo release → gripper driver reboot with verified open → home → <b>retry the
+    same combo</b>. Per-episode detail goes to a log file, the screen gets one line per 10 episodes
+    (20k output lines once froze VS Code).</p>
+    <div class="branches">
+      <div class="br yes"><span class="tag">RECOVERED</span>↩ retry same combo (step 5)</div>
+      <div class="br no"><span class="tag">3 CRASHES IN A ROW / NO BLOCK</span>stop — block left the table; human places it back</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ PHASE 2 ══════════════ -->
+<div class="phase"><span class="pn">PHASE 2</span><h2>Audit — data ships only if it passes</h2><span class="freq">once per dataset</span></div>
+<div class="steps">
+  <div class="step gate"><span class="num">16</span>
+    <h3>Pre-training audit<span class="where">DATA_STANDARD step 4</span></h3>
+    <p>Four checks against the finished dataset: episode count ≥ target · angle histogram (worst bin
+    &lt; 45% — the collapse check) · grid coverage (0/25 holes) · episode-length outliers. In the
+    automated overnight cycle this audit <b>is the decision-maker</b>.</p>
+    <div class="branches">
+      <div class="br yes"><span class="tag">PASS</span>V1 read: 229 eps · bins ~uniform · 25/25 cells · 0 outliers → push</div>
+      <div class="br no"><span class="tag">FAIL</span>nothing ships; fix the data, re-collect the gap, re-audit</div>
+    </div>
+    <div class="hwnote"><span class="tag">⚠ lesson</span>The one warning V1’s audit raised (“0° bin LOW”) was
+    the aliasing announcing itself — warnings get investigated, not rationalized.</div>
+  </div>
+</div>
+
+<!-- ══════════════ PHASE 3 ══════════════ -->
+<div class="phase"><span class="pn">PHASE 3</span><h2>Train on NSF ACCESS (DeltaAI)</h2><span class="freq">~1.5 GPU-hours</span></div>
+<div class="steps">
+
+  <div class="step"><span class="num">17</span>
+    <h3>Authenticate once — SSH ControlMaster</h3>
+    <p><code>ssh deltaai exit</code> = password + Duo <b>once</b>; the socket persists 12 h and every
+    later ssh/rsync/sbatch rides it. This is what makes the unattended overnight cycle possible.</p>
+    <div class="chips"><span class="chip">aabid@dtai-login.delta.ncsa.illinois.edu</span><span class="chip">ControlPersist 12h</span></div>
+  </div>
+
+  <div class="step"><span class="num">18</span>
+    <h3>Push the dataset</h3>
+    <p>rsync is incremental — re-running ships only new episodes.</p>
+    <div class="chips"><span class="chip">rsync -az data/lerobot_v1/ deltaai:~/lerobot_v1/</span></div>
+  </div>
+
+  <div class="step gate"><span class="num">19</span>
+    <h3>Login-node smoke test — 5 seconds that save the night</h3>
+    <p>Load ONE sample through LeRobotDataset on the login node — forces a real video decode, the exact
+    code path the job runs. Catches ~90% of first-job failures before the queue.</p>
+    <div class="branches">
+      <div class="br yes"><span class="tag">“sample OK”</span>submit</div>
+      <div class="br no"><span class="tag">DECODE FAILS</span>fix now — never debug a dataset through a Slurm queue at 2 a.m.</div>
+    </div>
+  </div>
+
+  <div class="step"><span class="num">20</span>
+    <h3>Submit + babysit for 2 minutes</h3>
+    <p>sbatch on one GH200 · ~0.037 s/step → 150k steps ≈ 1.5 h. Watch the first loss lines, then leave.
+    ARM gotchas baked into the job: site pytorch module 2.7.0 (newest removed VideoReader),
+    <code>--policy.push_to_hub=false</code> (job dies in 33 s without it), lerobot==0.4.4 pinned.</p>
+    <div class="chips"><span class="chip">partition ghx4 · batch 8 · save every 10k</span><span class="chip">V0: loss → 0.043</span></div>
+  </div>
+
+  <div class="step"><span class="num">21</span>
+    <h3>Pull the policy home</h3>
+    <p>From the machine that keeps the data (the lab PC — not from inside the ssh session):
+    <code>checkpoints/last/pretrained_model/</code> → <code>models/act_v1/</code>. The pre/post-processor
+    files MUST travel with the weights — normalization stats are part of the model.</p>
+    <div class="chips"><span class="chip">config.json · model.safetensors (197 MB) · processors · train_config.json</span></div>
+  </div>
+
+  <div class="step gate"><span class="num">22</span>
+    <h3>Verify offline BEFORE the arm</h3>
+    <p>Load test with the groot stub (lerobot imports every policy; groot is broken here), then
+    <b>offline replay</b>: run training episodes through the policy and compare predicted vs recorded actions.</p>
+    <div class="branches">
+      <div class="br yes"><span class="tag">REPLAY CLEAN</span>V0 measured 1.9 mm mean position error → the recipe is fine, deploy it</div>
+      <div class="br no"><span class="tag">REPLAY BAD</span>the problem is model/config-side — fix before touching hardware</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════ PHASE 4 ══════════════ -->
+<div class="phase"><span class="pn">PHASE 4</span><h2>Deploy — the 10 Hz control loop</h2><span class="freq">every 0.1 s tick</span></div>
+<div class="steps">
+
+  <div class="step"><span class="num">23</span>
+    <h3>Load the policy<span class="where">v1_test DEPLOY cell</span></h3>
+    <p>ACT 51.6M on CUDA with a <b>real</b> CPU fallback (config.device must be re-set to 'cpu' before the
+    retry — safetensors loads to config.device). Override <b>n_action_steps 100 → 10</b>: execute 1 s of
+    each predicted chunk, then re-infer. <b>No temporal ensembling</b> — averaging rotation vectors near
+    180° made rotation 3× worse in replay.</p>
+    <div class="chips"><span class="chip">inference 6–7 ms/tick</span><span class="chip">in: RGB 3×480×848 + state 9</span><span class="chip">out: chunk of 100 × 7-dim</span></div>
+  </div>
+
+  <div class="step"><span class="num">24</span>
+    <h3>Arm the safety envelope</h3>
+    <p>Everything the policy commands passes through this, every tick.</p>
+    <div class="chips"><span class="chip">XY box ±10 cm of start</span><span class="chip">Z ≥ table + 231 + 3 mm</span>
+    <span class="chip">step ≤ 22 mm/tick</span><span class="chip">EMA α=0.5</span>
+    <span class="chip">rot-rate ≤ 12°/tick</span><span class="chip">tilt ≤ 25°, yaw FREE</span></div>
+    <div class="hwnote"><span class="tag">⚠ yaw must be free</span>The old total-angle cap blocked the wrist
+    rotation the policy needs to align to rotated blocks — it caused edge grasps. Tilt-only keeps the tool
+    upright while letting it spin.</div>
+  </div>
+
+  <div class="step"><span class="num">25</span>
+    <h3>TICK: observe → predict</h3>
+    <p>Grab wrist image + build the 9-dim state from live topics → <code>predict_action</code> → take the
+    next action: target pose + gripper aperture in mm.</p>
+  </div>
+
+  <div class="step"><span class="num">26</span>
+    <h3>Sanitize the motion command</h3>
+    <p>In order: <b>rotvec branch canonicalization</b> (pick the ±2π branch nearest the current pose —
+    kills 180°-flip lurches) → clip to XY box + Z floor → EMA smooth → step cap → rotation-rate limit →
+    tilt gate → publish to <b>/arm/servo_l_cmd</b> (servo period 0.1 s; the original 2 ms bursts caused
+    mechanical stutter).</p>
+  </div>
+
+  <div class="step gate"><span class="num">27</span>
+    <h3>Gripper: the aperture-mm mapping</h3>
+    <p>The V1 policy commands the aperture directly (V0’s binary grip hid finger pre-positioning —
+    the policy literally could not express it).</p>
+    <div class="branches">
+      <div class="br no"><span class="tag">CMD &lt; 35 mm</span>force-close chain: clear_error → set_force 16 N → close (async, in that order)</div>
+      <div class="br alt"><span class="tag">35–90 mm</span>set_position(cmd) — the policy pre-positions its own fingers (observed: 86→59→55 staircase)</div>
+      <div class="br yes"><span class="tag">&gt; 90 mm while closed</span>open — with set_force 16 N re-asserted between clear and open (the 2 N trap again)</div>
+    </div>
+    <div class="chips"><span class="chip">only fire on &gt;4 mm change</span></div>
+  </div>
+
+  <div class="step gate"><span class="num">28</span>
+    <h3>Close stall retry</h3>
+    <p>2 s after a close: if the aperture is stuck &gt; 40 mm and hasn’t moved 1.5 mm, the async clear→force
+    race was lost — re-fire the whole chain.</p>
+    <div class="branches">
+      <div class="br yes"><span class="tag">SEATED</span>continue to handoff (step 29)</div>
+      <div class="br no"><span class="tag">STILL STALLED</span>↩ re-fire, max 3 attempts (mirrors the expert’s grip_refresh)</div>
+    </div>
+  </div>
+
+  <div class="step gate"><span class="num">29</span>
+    <h3>Handoff verdict — settle first, then judge</h3>
+    <p>Wait until the aperture <b>stops moving</b> (changing &gt; 1 mm → keep waiting, up to 8 s — “held” was
+    once declared mid-close at 57 mm), then band-check. The held verdict is the <b>else</b>, never the
+    fall-through (a slip once read “held” at 90.6 mm).</p>
+    <div class="branches">
+      <div class="br no"><span class="tag">&lt; 15 mm</span>closed on AIR → miss: open, no place</div>
+      <div class="br no"><span class="tag">&gt; 45 mm</span>bad grip / slipped during settle → open, abort</div>
+      <div class="br yes"><span class="tag">ELSE (≈ 24–38 mm seated)</span>HELD → hand off to step 30</div>
+    </div>
+    <div class="chips"><span class="chip">aperture scale reads ~20 mm under reality: 46 mm block seats at ~27 mm</span></div>
+  </div>
+
+  <div class="step"><span class="num">30</span>
+    <h3>Scripted lift–carry–place</h3>
+    <p>Policy’s job ends where the training episodes end (at lift). The script: /arm/stop (leave servo
+    mode) → lift → carry to centre → lower → clear_error + set_force + open → rise. Same division of
+    labour as the demos.</p>
+  </div>
+</div>
+
+<!-- ══════════════ PHASE 5 ══════════════ -->
+<div class="phase"><span class="pn">PHASE 5</span><h2>Eval — 100 graded grasps</h2><span class="freq">5×5 grid × {0°, 25°, 45°, 70°}</span></div>
+<div class="steps">
+
+  <div class="step"><span class="num">31</span>
+    <h3>Stagehand places the block<span class="where">v1_eval.ipynb, last cell</span></h3>
+    <p>The scripted expert (phase 1 machinery, nothing recorded) puts the block at the combo’s cell +
+    angle — or it’s <b>already there</b>: a clean pick (grade ≥ 0.8, yaw error &lt; 15°) gets placed
+    directly at the next combo’s pose, wrist-rotating the held block to the next angle. 90° is skipped
+    as an angle: on a square block it is physically identical to 0°.</p>
+    <div class="chips"><span class="chip">resume-safe ledger: data/v1_eval_100.json</span><span class="chip">~1 min, output captured (not frozen!)</span></div>
+  </div>
+
+  <div class="step"><span class="num">32</span>
+    <h3>Policy rollout — the thing being tested</h3>
+    <p>Same loop as steps 25–28, max 600 ticks (60 s — off-centre reaches creep). The arm
+    <b>freezes the instant the policy closes</b>: the policy learned to lift (episodes end at lift), and
+    its uncontrolled lift was shaking blocks loose before they could be graded.</p>
+  </div>
+
+  <div class="step gate"><span class="num">33</span>
+    <h3>Lift-verify — did it really pick it up?</h3>
+    <p>Controlled 8 cm lift, then read the aperture. Success is surviving the lift, not touching the block.</p>
+    <div class="branches">
+      <div class="br yes"><span class="tag">12–45 mm</span>SEATED PICK → full grading</div>
+      <div class="br alt"><span class="tag">45–70 mm</span>EDGE/CORNER pick — held, but half credit (base 0.5)</div>
+      <div class="br no"><span class="tag">ELSE</span>slipped or air → FAIL, grade 0</div>
+    </div>
+  </div>
+
+  <div class="step"><span class="num">34</span>
+    <h3>Grade 0–1 + record</h3>
+    <p>Base 1.0 (or 0.5 edge) − 0.1 per extra re-grip − up to 0.4 for yaw error vs the block’s placed
+    angle (gripper is 180°-symmetric, square block 90°: error = min(d, 90−d)) − 0.2 outside the
+    20–40 mm seated band. Written to the JSON after <b>every</b> grasp — interrupt any time, resume free.</p>
+    <div class="chips"><span class="chip">per-grasp: success · grade · edge · yaw_err · ap · tries · placed=direct|scripted</span></div>
+  </div>
+
+  <div class="step gate"><span class="num">35</span>
+    <h3>The failure ladder — it never grinds garbage</h3>
+    <p>Distinguishes <b>policy</b> failures (real data) from <b>hardware</b> failures (pollution).</p>
+    <div class="branches">
+      <div class="br alt"><span class="tag">STALL FINGERPRINT (ap pinned &gt; 85 mm, 2+ tries)</span>hardware, not policy: gripper reboot → ↩ retry same combo, nothing recorded; 2 in a row after a verified reboot = stop</div>
+      <div class="br no"><span class="tag">POLICY FAIL</span>recorded → total reset (gripper reboot + home) → next combo</div>
+      <div class="br no"><span class="tag">5 FAILS IN A ROW</span>relaunch the ENTIRE driver stack in place → resume</div>
+      <div class="br no"><span class="tag">10 IN A ROW</span>stop loudly — block off the table or physical damage; no reset fixes that</div>
+    </div>
+    <div class="hwnote"><span class="tag">⚠ why this exists</span>A dying gripper once recorded 36 identical
+    “policy failures” in an hour. Hardware faults now reboot-and-retry; only real behavior reaches the ledger.</div>
+  </div>
+
+  <div class="step"><span class="num">36</span>
+    <h3>Heat-maps + summary plots</h3>
+    <p>Per-angle 5×5 grade heat-maps (colour = grade, value annotated per cell) + success-by-angle,
+    success-by-ring-distance, yaw-error and aperture histograms. Renders on partial data too.</p>
+    <div class="chips"><span class="chip">RESULT: 97/100 · rotated 75/75 · 0° = 22/25</span>
+    <span class="chip">mean grade 0.70</span><span class="chip">no spatial falloff (97% @6 cm ring)</span>
+    <span class="chip">docs/figures/v1_eval_heatmap.png</span><span class="chip">full analysis: docs/V1_EVAL_REPORT.md</span></div>
+    <div class="loopback">↩ findings drive the next data design — V1.1 fixes the 0° aliasing, then <b>back to step 5</b> with better data. That loop IS the method.</div>
+  </div>
+</div>
+
+</div><!-- /#full -->
+
+<footer>
+  Source of truth: <code>docs/FULL_PIPELINE.md</code> (every option explored + failure→fix ledger) ·
+  method: <code>docs/DATA_STANDARD.md</code> · cluster runbook: <code>docs/NSF_TRAINING.md</code> ·
+  measured comparison: <code>docs/V0_V1_COMPARISON.md</code>. Notebooks: v1_collect / v1_1_collect
+  (collection), v1_test (deploy), v1_eval (the 100-grasp eval).
+</footer>
+</div>
+
+<script>
+(function(){
+  var phases=[], steps=[];
+  document.querySelectorAll('#full .phase').forEach(function(ph){
+    var pn=ph.querySelector('.pn').textContent.trim();
+    var pt=ph.querySelector('h2').textContent.trim();
+    var freq=(ph.querySelector('.freq')||{textContent:''}).textContent.trim();
+    var box=ph.nextElementSibling;
+    var pi={pn:pn,pt:pt,freq:freq,steps:[]}; phases.push(pi);
+    box.querySelectorAll('.step').forEach(function(st){
+      var n=st.querySelector('.num').textContent.trim();
+      var t=st.querySelector('h3').childNodes[0].textContent.trim();
+      var s={n:n,t:t,el:st,phase:pi,gate:st.classList.contains('gate')};
+      pi.steps.push(s); steps.push(s);
+    });
+  });
+  var bigmap=document.getElementById('bigmap');
+  phases.forEach(function(pi){
+    var row=document.createElement('div'); row.className='mphase';
+    var lab=document.createElement('div'); lab.className='mp';
+    lab.innerHTML='<b>'+pi.pn+'</b>'+pi.pt+(pi.freq?'<br>'+pi.freq:'');
+    row.appendChild(lab);
+    var nodes=document.createElement('div'); nodes.className='mnodes';
+    pi.steps.forEach(function(s){
+      var b=document.createElement('button'); b.type='button';
+      b.className='mnode'+(s.gate?' gate':'');
+      var short=s.t.length>30 ? s.t.slice(0,29).replace(/\s+\S*$/,'')+'…' : s.t;
+      b.innerHTML='<span class="n">'+s.n+'</span>'+short;
+      b.title='Step '+s.n+' — '+s.t;
+      b.addEventListener('click',function(){open(parseInt(s.n,10)-1);});
+      nodes.appendChild(b);
+    });
+    row.appendChild(nodes); bigmap.appendChild(row);
+  });
+  var cur=-1;
+  function open(i){
+    if(i<0||i>=steps.length) return;
+    cur=i; var s=steps[i];
+    document.body.classList.add('slides');
+    var box=document.getElementById('slidebox');
+    box.innerHTML=''; var c=s.el.cloneNode(true);
+    c.querySelector('h3').setAttribute('data-n','Step '+s.n);
+    box.appendChild(c);
+    document.getElementById('stg-ph').textContent=s.phase.pn+' — '+s.phase.pt;
+    document.getElementById('stg-count').textContent='step '+s.n+' / '+steps.length;
+    document.getElementById('stg-fill').style.width=(100*(i+1)/steps.length)+'%';
+    document.getElementById('btn-prev').disabled=(i===0);
+    document.getElementById('btn-next').textContent=(i===steps.length-1)?'Done — back to map':'Next →';
+    try{history.replaceState(null,'','#step-'+s.n);}catch(e){}
+    window.scrollTo(0,0);
+  }
+  function closeShow(){
+    document.body.classList.remove('slides'); cur=-1;
+    try{history.replaceState(null,'','#');}catch(e){}
+  }
+  document.getElementById('startshow').addEventListener('click',function(){open(0);});
+  document.getElementById('btn-prev').addEventListener('click',function(){open(cur-1);});
+  document.getElementById('btn-next').addEventListener('click',function(){
+    if(cur>=steps.length-1) closeShow(); else open(cur+1);});
+  document.getElementById('btn-map').addEventListener('click',closeShow);
+  document.addEventListener('keydown',function(e){
+    if(!document.body.classList.contains('slides')) return;
+    if(e.key==='ArrowRight'||e.key===' '){e.preventDefault();if(cur>=steps.length-1)closeShow();else open(cur+1);}
+    else if(e.key==='ArrowLeft'){e.preventDefault();open(cur-1);}
+    else if(e.key==='Escape'){closeShow();}
+  });
+  var m=location.hash.match(/^#step-(\d+)$/);
+  if(m) open(parseInt(m[1],10)-1);
+})();
+</script>
