@@ -145,5 +145,16 @@ The re-grip tax remains the dominant quality limiter (mechanical: AX-12 + 2N rac
 | Angle contract enforced | **documented as true** | **FALSE — 86 angle-flagged episodes kept (Finding A)** |
 | Dataset = training set | assumed | **FALSE — 3-episode drift (Finding B)** |
 
+### Addendum (paper experiments, same day)
+- **V0 same-protocol replay**: 5.9 mm / 0.93° median (n=90) — both policies replay "fine";
+  neither replay predicted its deployment behaviour.
+- **Aliasing probes are NEGATIVE offline**: one-step replay AND chunk-tail probes from
+  ambiguous start frames predict correct final yaw even on 0°/90° episodes (0.8° median).
+  The defect that caused all 3 hardware failures is invisible to every offline metric we
+  could construct — the distribution audit and the graded hardware eval are load-bearing.
+- Wilson CIs on all headline rates in `data/paper_stats.json`; camera-ready pipeline
+  figure `figures/appendix/fig1_pipeline.png`; results tables `docs/paper_results_table.{csv,tex}`;
+  full draft: **[WORKSHOP_PAPER_DRAFT.md](WORKSHOP_PAPER_DRAFT.md)**.
+
 **Still requires the arm** (live bake-off notebook): angle accuracy vs ground-truth placed
 angle, Gemini detector latency/rate leg, GraspGenX yaw comparison.

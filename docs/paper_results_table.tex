@@ -1,0 +1,17 @@
+\begin{tabular}{lrrl}
+\toprule
+Metric & V0 & V1 & $\Delta$ \\
+\midrule
+episodes & 60 & 229 & 3.8x \\
+collection rate (eps/hr, unattended) & 31.6 & 66.7 & 2.1x \\
+median episode length (s) & 39.6 & 11.2 & 3.5x denser \\
+worst angle-bin share & 71\% & 19.7\% & de-collapsed \\
+grid coverage holes & uncontrolled & 0/25 & complete \\
+distinct grip commands & 2 & 7 & pre-position expressible \\
+replay pos err, same protocol (median mm) & 5.9 & 1.8 &  \\
+replay rot err (median deg) & 0.93 & 1.13 &  \\
+deploy: rotated blocks & froze & 100\% (75/75) & the headline \\
+deploy: overall graded eval & n/a & 97\% (CI 91.5-99.0), grade 0.70 &  \\
+deploy: workspace edge (6cm ring) & miss & 97\% & no falloff \\
+\bottomrule
+\end{tabular}
