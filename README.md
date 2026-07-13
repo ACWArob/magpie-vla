@@ -25,7 +25,8 @@ end-to-end record — every stage, option explored, and failure→fix:
 | **V1 collection** (5×5 grid × 7 angles, aperture-mm actions, angle contract, ~225 eps) | [notebooks/v1_collect.ipynb](notebooks/v1_collect.ipynb) |
 | **Training on NSF ACCESS (DeltaAI)** — validated runbook, ARM pitfalls, slurm job | [docs/NSF_TRAINING.md](docs/NSF_TRAINING.md) · slides template: [docs/NSF_ACCESS_SLIDES.md](docs/NSF_ACCESS_SLIDES.md) |
 | **Deployment** — 10 Hz closed-loop ACT with safety envelope | [notebooks/v0_test.ipynb](notebooks/v0_test.ipynb) |
-| **Results & analysis** | [docs/V0_ANALYSIS.md](docs/V0_ANALYSIS.md) · [tests/July_7_Update.md](tests/July_7_Update.md) · research: [docs/V1_data_research.md](docs/V1_data_research.md) |
+| **Results & analysis** | [docs/V1_EVAL_REPORT.md](docs/V1_EVAL_REPORT.md) (97/100) · [docs/OFFLINE_TEST_REPORT.md](docs/OFFLINE_TEST_REPORT.md) · [docs/V0_ANALYSIS.md](docs/V0_ANALYSIS.md) · research: [docs/V1_data_research.md](docs/V1_data_research.md) |
+| **Decisions & paper** | [docs/DECISION_LEDGER.md](docs/DECISION_LEDGER.md) (every gate + scoreboard) · [docs/WORKSHOP_PAPER_DRAFT.md](docs/WORKSHOP_PAPER_DRAFT.md) · [docs/V1_1_PLAN.md](docs/V1_1_PLAN.md) · [docs/EXECUTION_PLAN.md](docs/EXECUTION_PLAN.md) |
 
 **V0 result:** 60 episodes → ACT (51.6M) trained in 62 min on one GH200 (~1 GPU-hour) →
 **autonomous picks on the real arm the same day** (visual reach, self-rotation, grasp, lift).
