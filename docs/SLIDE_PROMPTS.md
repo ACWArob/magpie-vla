@@ -44,10 +44,10 @@ Image: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/v1_
 Add one-sentence speaker notes per slide.
 ```
 
-## Prompt 2 — NSF deck (lab runbook edition, ~10 min, 11 slides)
+## Prompt 2 — NSF deck (lab runbook edition, ~10 min, 12 slides — framework-agnostic)
 
 ```
-Make me a Microsoft PowerPoint (.pptx) presentation, 11 slides. This is a practical
+Make me a Microsoft PowerPoint (.pptx) presentation, 12 slides. This is a practical
 runbook talk for my robotics lab: by the end, anyone with an NSF ACCESS allocation should
 be able to run THEIR OWN training job this week by copying my commands. Show real commands
 in code blocks on the slides — that is the point of this deck. Anything in <ANGLE_BRACKETS>
@@ -113,13 +113,25 @@ Slide 6 (the 4 pitfalls we hit — so you don't):
 
 Slide 7 (the 5-second test that saves the night). On the login node, BEFORE submitting:
 ```
-python -c "<load ONE sample of YOUR data through YOUR library>"
-# ours: ds = LeRobotDataset('magpie/v1', root='$HOME/lerobot_v1'); ds[0]  # forces real video decode
+python -c "<load ONE sample of YOUR data through YOUR framework>"
+# robot-policy example (ours):  LeRobotDataset(...)[0]      # forces real video decode
+# LLM example:                  AutoModel.from_pretrained() # forces weight download+load
+# vision example:               next(iter(DataLoader(ds)))  # forces decode+transform
 ```
 Exercises the exact code path the job will run. Caught a failure that would have crashed at 2 a.m.
 Catches ~90% of first-job failures. Never trust an overnight job you haven't smoke-tested.
 
-Slide 8 (the Slurm job — our actual working file, adapt the last line to your project):
+Slide 8 (WHAT are you training? Same skeleton, swap 3 lines). The whole recipe is
+framework-agnostic — only pip line, train command, and resources change. Table:
+| You want to train... | pip install | train command looks like | typical ask |
+| Robot policy / imitation (our case) | lerobot==0.4.4 (PIN the version that wrote your data) | python -m lerobot.scripts.lerobot_train --dataset.root=... | 1 GPU, 1-2 h |
+| Fine-tune an LLM / VLM | transformers peft trl accelerate | accelerate launch train.py or trl sft ... | 1-4 GPUs, hours |
+| Vision model (detector/classifier) | timm / ultralytics / torchvision | python train.py --data ... --epochs ... | 1 GPU, minutes-hours |
+| RL in simulation | your sim (mujoco, isaac) + sb3/rsl_rl | python train_rl.py --headless | 1 GPU + MANY CPUs (--cpus-per-task=32) |
+| Anything embarrassingly parallel (sweeps) | same as above | sbatch --array=0-15 sweep.slurm | many small jobs beat one big one |
+Two universal rules: PIN the version of whatever WROTE your data format, and ask `accounts`/docs which partition fits (GPU partitions for training, CPU partitions exist too and don't burn GPU credits).
+
+Slide 9 (the Slurm job — our actual working file, adapt the last line to your project):
 ```
 #!/usr/bin/env bash
 #SBATCH --account=<YOUR_ACCOUNT>      # from `accounts`
@@ -135,7 +147,7 @@ python -m <YOUR_TRAINING_COMMAND> --checkpoint_every <N>
 Jobs start from a clean shell — the module loads MUST be repeated inside the script.
 Checkpoint often: a killed job with checkpoints is still a result.
 
-Slide 9 (submit + babysit for exactly 2 minutes):
+Slide 10 (submit + babysit for exactly 2 minutes):
 ```
 sbatch train.slurm
 squeue -u $USER          # PD = queued, R = running (1-GPU jobs start in minutes)
@@ -144,7 +156,7 @@ tail -f train_*.log      # WAIT until real progress lines tick, then log out
 Healthy = loss lines ticking. Instant traceback = fix NOW, not tomorrow. sbatch jobs
 survive logout. Our numbers: 0.037 s/step on a GH200 → 150k steps ≈ 1.5 h.
 
-Slide 10 (pull results home + verify). From YOUR machine (not inside the ssh session):
+Slide 11 (pull results home + verify). From YOUR machine (not inside the ssh session):
 ```
 rsync -avz deltaai:<RUN_DIR>/checkpoints/last/ ~/models/<NAME>/
 python -c "<load the checkpoint and print param count>"   # verify BEFORE deploying
@@ -152,7 +164,7 @@ python -c "<load the checkpoint and print param count>"   # verify BEFORE deploy
 Then verify offline against held-out data before touching hardware — our replay test
 measured 1.9 mm error and told us the model was fine before the robot ever moved.
 
-Slide 11 (the end state — one command, overnight):
+Slide 12 (the end state — one command, overnight):
 ```
 ssh deltaai exit                      # Duo once, before leaving the lab
 nohup bash auto_train_cycle.sh v1 150000 &
