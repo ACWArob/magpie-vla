@@ -393,14 +393,22 @@ Inference 6–7 ms/tick on the 2070.
 
 - **V0**: informal — reliable in-zone, froze on rotated blocks (mode averaging), missed
   beyond the scatter. Documented in V0_ANALYSIS.md with 4 figures.
-- **V1**: **100-grasp graded grid eval** (`v1_1_collect.ipynb`, last cell): 5×5 cells ×
+- **V1**: **100-grasp graded grid eval** (`v1_eval.ipynb`): 5×5 cells ×
   angles {0°, 25°, 45°, 70°} (90° ≡ 0° on a square block). Per grasp: scripted place →
-  policy rollout → **lift-verify** (8 cm up, aperture must hold the seated band — slip-outs
+  policy rollout (arm freezes at close — the policy learned to lift and shook blocks loose) →
+  **lift-verify** (8 cm up, aperture must hold the seated band — slip-outs
   fail) → grade 0–1 (penalties: extra re-grips −0.1 each, yaw error vs block angle up to
-  −0.4, aperture outside 20–40 mm −0.2) → place back at centre. Resume-safe JSON
-  (`data/v1_eval_100.json`), crash/miss failsafe with gripper-reboot recovery, 3 consecutive
-  failures stops. Outputs: per-angle grade heat-maps + summary plots (success by angle, by
-  ring distance, yaw-error histogram, aperture histogram) → `docs/figures/`.
+  −0.4, aperture outside 20–40 mm −0.2) → place directly at the next combo (clean picks)
+  or via the scripted stagehand. Resume-safe JSON (`data/v1_eval_100.json`); failure ladder:
+  hardware stalls reboot+retry unrecorded, policy fails total-reset, 5-in-a-row relaunches
+  the driver stack, 10 stops. Outputs: per-angle grade heat-maps + summary plots →
+  `docs/figures/v1_eval_heatmap.png`, `v1_eval_summary.png`.
+- **V1 MEASURED (2026-07-13, full report [V1_EVAL_REPORT.md](V1_EVAL_REPORT.md))**:
+  **97/100 picks, mean grade 0.70**. Rotated blocks (25/45/70°): **100% (75/75)** — the
+  V0-freeze case solved. Straight blocks (0°): 88% and grade 0.58 — all 3 failures of the
+  run, two with ~41° yaw error = the 0/90 aliasing confirmed on hardware (V1.1's target).
+  No spatial falloff (97% at the 6 cm ring — designed coverage worked). Grip-authority tax:
+  94/97 picks needed ≥1 stall re-grip (mechanical, the main quality limiter).
 - The grid heat-map is the project's standard result format — the same 5×5×angle grid used
   for collection is used for evaluation, and the planned paper ablations (§9) all report on it.
 

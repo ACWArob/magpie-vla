@@ -34,14 +34,15 @@ after each policy's grid evaluation. Companion docs: [V0_ANALYSIS.md](V0_ANALYSI
 | Final loss | 0.043 | *(fill in)* |
 | Offline replay error | 1.9 mm | *(fill in)* |
 
-## Deployment (grid evaluation — the number that matters)
+## Deployment (grid evaluation — measured 2026-07-13, 100 graded grasps)
 
 | | **V0 policy** | **V1 policy** |
 |---|---|---|
-| In-zone straight block | reliable picks (incl. off-center visual tracking) | *(eval pending)* |
-| Rotated block (30–45°) | **froze** (mode averaging) | *(eval pending — the headline test)* |
-| Boundary cells (±6cm) | miss (descent regressed to training mean) | *(eval pending)* |
-| Per-cell heat-map | n/a (not measured systematically) | *(to be produced on the same 5×5×7 grid)* |
+| **Overall** | n/a (not measured systematically) | **97/100 (97%), mean grade 0.70** |
+| In-zone straight block (0°) | reliable picks (incl. off-center visual tracking) | 88% — all 3 run failures here (0/90 aliasing, grade 0.58) |
+| Rotated block (25–70°) | **froze** (mode averaging) | **100% (75/75) — the headline result** |
+| Boundary cells (±6cm) | miss (descent regressed to training mean) | **97% at the 6 cm ring** (no spatial falloff) |
+| Per-cell heat-map | n/a | [figures/v1_eval_heatmap.png](figures/v1_eval_heatmap.png) · full report: [V1_EVAL_REPORT.md](V1_EVAL_REPORT.md) |
 
 **How to read this document:** every V1 improvement in the collection table is a *designed
 response* to a *measured* V0 failure — the mapping is 1:1 with the findings in
