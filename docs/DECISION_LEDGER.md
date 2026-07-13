@@ -9,6 +9,11 @@ or a logical argument. Each reason is tagged:*
 - **[TO-MEASURE]** — judgment call at the time; experiment queued to quantify it
   (→ `notebooks/appendix_bakeoff.ipynb` unless noted)
 
+![gate scoreboard](figures/appendix/gate_scoreboard.png)
+*One panel per gate: chosen (green) vs rejected (red); amber "est." bars are literature/
+vendor numbers — every other number measured on our hardware. Sources: OFFLINE_TEST_REPORT.md,
+V1_EVAL_REPORT.md, V0_ANALYSIS.md.*
+
 ---
 
 ## Gate 1 — How do we get demonstrations at all?

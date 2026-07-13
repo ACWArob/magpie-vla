@@ -127,6 +127,10 @@ The re-grip tax remains the dominant quality limiter (mechanical: AX-12 + 2N rac
 
 ---
 
+## The scoreboard — every gate as one comparison chart
+
+![scoreboard](figures/appendix/gate_scoreboard.png)
+
 ## Summary table — what moved from claim to measurement today
 
 | Claim | Status before | Now |
