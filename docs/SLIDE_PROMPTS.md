@@ -44,10 +44,10 @@ Image: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/v1_
 Add one-sentence speaker notes per slide.
 ```
 
-## Prompt 2 — NSF deck (lab runbook edition, ~10 min, 12 slides — framework-agnostic)
+## Prompt 2 — NSF deck (lab runbook edition, ~11 min, 13 slides — framework-agnostic)
 
 ```
-Make me a Microsoft PowerPoint (.pptx) presentation, 12 slides. This is a practical
+Make me a Microsoft PowerPoint (.pptx) presentation, 13 slides. This is a practical
 runbook talk for my robotics lab: by the end, anyone with an NSF ACCESS allocation should
 be able to run THEIR OWN training job this week by copying my commands. Show real commands
 in code blocks on the slides — that is the point of this deck. Anything in <ANGLE_BRACKETS>
@@ -131,7 +131,20 @@ framework-agnostic — only pip line, train command, and resources change. Table
 | Anything embarrassingly parallel (sweeps) | same as above | sbatch --array=0-15 sweep.slurm | many small jobs beat one big one |
 Two universal rules: PIN the version of whatever WROTE your data format, and ask `accounts`/docs which partition fits (GPU partitions for training, CPU partitions exist too and don't burn GPU credits).
 
-Slide 9 (the Slurm job — our actual working file, adapt the last line to your project):
+Slide 9 (WHERE do your model and data come from? Three starting points):
+| Starting point | What it means | Cluster gotcha |
+| TRAIN FROM SCRATCH (our ACT policy) | your own data, random weights (maybe an ImageNet backbone) | only your dataset needs uploading — smallest footprint |
+| FINE-TUNE a pretrained model (LLMs, SmolVLA, YOLO...) | download base weights from Hugging Face, train on top | download weights ON THE LOGIN NODE first — compute nodes often have no internet; a job that tries to download dies |
+| PULL A DATASET from Hugging Face | skip collection, train on public data | same rule: `huggingface-cli download <repo>` on the login node, then point the job at the local path |
+Practical setup for HF on any cluster:
+```
+export HF_HOME=~/scratch/hf_cache        # big caches do NOT belong in your small $HOME quota
+huggingface-cli download <MODEL_OR_DATASET>   # on the login node, before submitting
+export HF_HUB_OFFLINE=1                  # inside the job: force cache, never the network
+```
+Our example is the from-scratch row; a labmate fine-tuning an LLM lives in row 2 — the rest of this deck is identical for both.
+
+Slide 10 (the Slurm job — our actual working file, adapt the last line to your project):
 ```
 #!/usr/bin/env bash
 #SBATCH --account=<YOUR_ACCOUNT>      # from `accounts`
@@ -147,7 +160,7 @@ python -m <YOUR_TRAINING_COMMAND> --checkpoint_every <N>
 Jobs start from a clean shell — the module loads MUST be repeated inside the script.
 Checkpoint often: a killed job with checkpoints is still a result.
 
-Slide 10 (submit + babysit for exactly 2 minutes):
+Slide 11 (submit + babysit for exactly 2 minutes):
 ```
 sbatch train.slurm
 squeue -u $USER          # PD = queued, R = running (1-GPU jobs start in minutes)
@@ -156,7 +169,7 @@ tail -f train_*.log      # WAIT until real progress lines tick, then log out
 Healthy = loss lines ticking. Instant traceback = fix NOW, not tomorrow. sbatch jobs
 survive logout. Our numbers: 0.037 s/step on a GH200 → 150k steps ≈ 1.5 h.
 
-Slide 11 (pull results home + verify). From YOUR machine (not inside the ssh session):
+Slide 12 (pull results home + verify). From YOUR machine (not inside the ssh session):
 ```
 rsync -avz deltaai:<RUN_DIR>/checkpoints/last/ ~/models/<NAME>/
 python -c "<load the checkpoint and print param count>"   # verify BEFORE deploying
@@ -164,7 +177,7 @@ python -c "<load the checkpoint and print param count>"   # verify BEFORE deploy
 Then verify offline against held-out data before touching hardware — our replay test
 measured 1.9 mm error and told us the model was fine before the robot ever moved.
 
-Slide 12 (the end state — one command, overnight):
+Slide 13 (the end state — one command, overnight):
 ```
 ssh deltaai exit                      # Duo once, before leaving the lab
 nohup bash auto_train_cycle.sh v1 150000 &
