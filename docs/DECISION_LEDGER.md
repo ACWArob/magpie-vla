@@ -79,7 +79,7 @@ interface for a custom gripper. [MEASURED] 1.8 GB VRAM measured alongside SAM3 �
 
 | Rejected | Why |
 |---|---|
-| Keep everything | [MEASURED — literature + our audit] robomimic: mixed-quality data hurts plain BC. Our own gate rejected the `issue=angle` episodes that would have re-poisoned V1. |
+| Keep everything | [MEASURED — literature + our audit] robomimic: mixed-quality data hurts plain BC. ⚠ CORRECTION (OFFLINE_TEST_REPORT Finding A): the angle-flag reject was documented but NEVER enforced — 86/88 `issue=angle` attempts passed on reward alone. V1.1 must enforce it or fix the flag semantics. |
 | Human labeling | [MEASURED] 229 episodes × ~30 s/label ≈ 2 h of human time per collection run — the exact cost the pipeline exists to delete. Judge agreement with humans: [TO-MEASURE → judge-agreement experiment, queued]. |
 
 **Save rate at scale:** [MEASURED] 99.1% over 231 attempts — the gate rejects little, but
