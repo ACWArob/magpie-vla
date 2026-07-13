@@ -39,7 +39,8 @@
 ---
 
 ## Slide 3 — Act 1: the scripted expert (the data generator)
-**IMAGE: a wrist-cam frame with the SAM3 mask overlay (grab one from any episode) — right half of slide**
+**IMAGE (right half):**
+![SAM3 wrist overlay](figures/sam3_wrist_overlay.png)
 - Pipeline per pick: **SAM3** text-query segmentation → move above → closed-loop centering → point cloud → grasp angle (minAreaRect flat-face snap) → **re-localise at the grasp angle** → descend → **DeliGrasp** force closure → slip-guarded lift
 - Runs on the lab RTX 2070 (8 GB): SAM3 ~4.5 GB + GraspGenX ~1.8 GB coexist
 - Self-resetting: places the block at the next grid target itself → hands-free collection
@@ -59,7 +60,9 @@
 ---
 
 ## Slide 5 — Act 2: what we learned about DATA (V0, the honest failure)
-**IMAGE: figures/v0/fig1_angle_collapse.png (left) + figures/v0/fig2_support_vs_grid.png (right)**
+**IMAGE (side by side):**
+![angle collapse](figures/v0/fig1_angle_collapse.png)
+![support vs grid](figures/v0/fig2_support_vs_grid.png)
 - V0: 60 episodes, random placement ±4 cm, random angle → trained fine (loss 0.043, replay error 1.9 mm) → **deployment told the truth:**
   - Picks succeed only INSIDE the training scatter — interpolation, not extrapolation
   - **42/62 episodes grasped at ~90° regardless of block angle** → policy FROZE on a 45° block (imitation averages conflicting modes into inaction)
@@ -71,7 +74,8 @@
 ---
 
 ## Slide 6 — V1 data design: every choice answers a measured failure
-**IMAGE: figures/v0_v1/compare_angles_lengths.png (bottom strip, under the table)**
+**IMAGE (bottom strip):**
+![v0 v1 compare](figures/v0_v1/compare_angles_lengths.png)
 | V0 finding | V1 response |
 |---|---|
 | interpolation-only | **5×5 grid @3 cm × 7 angles @15° + jitter** — designed support, 0/25 holes |
@@ -87,7 +91,8 @@
 ---
 
 ## Slide 7 — The audit: data ships only if it passes
-**IMAGE: screenshot of the audit cell output (angle histogram + '0° LOW' warning line highlighted)**
+**IMAGE:**
+![audit angle histogram](figures/v1_audit_angles.png)
 - Before any training run: episode count, angle histogram (collapse check), grid coverage holes, length outliers
 - V1 audit: 229 eps · angle bins ~uniform · 25/25 cells · 0 outliers → PASS
 - One warning ("0° bin LOW") we misread — it was the **0°/90° aliasing** announcing itself (next slide's punchline)
@@ -130,7 +135,8 @@
 ---
 
 ## Slide 11 — Does it work? (measured: 100-grasp eval, 2026-07-13)
-**IMAGE: figures/v1_eval_heatmap.png (full width — this is the money figure)**
+**IMAGE (full width — the money figure):**
+![v1 eval heatmap](figures/v1_eval_heatmap.png)
 - **97 / 100 picks, mean grade 0.70** — fully unattended protocol
 - **Rotated blocks (25°/45°/70°): 100% (75/75)** — the exact case V0 froze on
 - Straight blocks (0°): 88%, grade 0.58 — ALL 3 failures of the run, right where the audit warned
@@ -147,14 +153,16 @@
 - Failsafe ladder: any fail → full reset · 5 in a row → relaunch entire driver stack · hardware stalls never pollute the score
 - Grading separates success from quality: 0° *succeeds* 88% but at 0.58 grade — success-rate alone would hide the aliasing
 - Secondary finding: 94/97 picks needed ≥1 stall re-grip (AX-12 grip authority) — the main QUALITY limiter, mechanical not learned
-**IMAGE: figures/v1_eval_summary.png (4-panel: success by angle, grade by angle, yaw-error hist, aperture hist)**
+**IMAGE:**
+![v1 eval summary](figures/v1_eval_summary.png)
 
 *Speaker notes: The eval instrument itself is a contribution: policies that learn to lift shook blocks loose mid-grade (fixed: freeze at close), a dying gripper once wrote 36 fake policy failures in an hour (fixed: hardware circuit breaker — reboot, retry, ledger stays clean), and clean picks stage the next combo themselves (57/100 direct placements). Same instrument re-runs unchanged for V1.1 and V2 — before/after heat-maps on identical protocol.*
 
 ---
 
 ## Slide 13 — What's next (the ladder)
-**IMAGE: the 0° column of v1_eval_heatmap.png cropped, labelled 'V1.1 target' — before/after teaser**
+**IMAGE (before/after teaser):**
+![0 deg column — V1.1 target](figures/v1_eval_0deg_column.png)
 - **V1.1** (days): fix 0/90 aliasing (canonical labels + ~35 replacement episodes) → retrain → re-eval on the SAME grid → before/after heat-maps
 - **V2** (weeks): multi-object (fruit), 100 episodes each — tests whether the method transfers past blocks
 - **Research thrusts** (fall): MuJoCo sim-twin data multiplication · continual-learning memory with the reward gate as write filter · combination paper (2×2 ablation on the same grid)
