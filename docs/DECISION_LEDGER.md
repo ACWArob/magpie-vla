@@ -26,7 +26,7 @@ or a logical argument. Each reason is tagged:*
 
 | Rejected | Why |
 |---|---|
-| Gemini box | [TO-MEASURE → bake-off figs A] latency (~1–2 s/query vs SAM3 ~0.2 s) and box-only output. [CONSTRAINT] a box has no pixels → no segmented point cloud → no PCA/geometry downstream. Kept for object *identification* only. |
+| Gemini box | [CONSTRAINT] a box has no pixels → no segmented point cloud → no geometry downstream. Kept for object *identification* only. Latency leg: live bake-off. [MEASURED — OFFLINE_TEST_REPORT §4] note: on the red block a 2 ms HSV threshold matches SAM3 100%/1px — SAM3's justification is text-query GENERALITY (V2 multi-object), and its 1050 ms measured latency (10× the tick budget) is why deploy runs detector-free end-to-end. |
 | OWL-ViT-class | [CONSTRAINT] same box-only limitation; superseded early. |
 | LocateAnything | [CONSTRAINT] does not fit the RTX 2070 (8 GB) beside the rest of the stack without int4 quantization — backlogged, not rejected on merit. |
 
@@ -61,7 +61,7 @@ interface for a custom gripper. [MEASURED] 1.8 GB VRAM measured alongside SAM3 �
 | Rejected | Why |
 |---|---|
 | Gemini arbiter | [MEASURED] the V0 smoking gun: arbiter chose ~90° regardless of block angle → **71% of the dataset in one angle bin** → mode-averaging froze the policy on rotated blocks (V0_ANALYSIS fig 1). Also non-deterministic across calls. |
-| mask-PCA alone | [TO-MEASURE → bake-off fig B] PCA tracks the major axis, not the flat FACE — on near-square masks the axis is ill-conditioned (ratio→1) and jitters. minAreaRect snaps to the face a parallel-jaw gripper actually needs. |
+| mask-PCA alone | [MEASURED — OFFLINE_TEST_REPORT §5] frame-to-frame jitter 1.65° median / **12.39° p90** vs minAreaRect's 0.31°/0.47° on identical frames; PCA-vs-rect disagree 12.7° median on the same mask (near-square ill-conditioning) while rect is detector-independent to 0.3°. |
 
 **Result of the fix:** [MEASURED] worst angle bin 71% → **19.7%** in V1; deploy eval:
 75/75 on rotated blocks.
