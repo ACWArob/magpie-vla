@@ -44,29 +44,123 @@ Image: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/v1_
 Add one-sentence speaker notes per slide.
 ```
 
-## Prompt 2 — NSF deck (~5 min, 5 slides)
+## Prompt 2 — NSF deck (lab runbook edition, ~10 min, 11 slides)
 
 ```
-Make me a Microsoft PowerPoint (.pptx) presentation, 5 slides, to present in ~5 minutes.
-It follows another deck in the same session, so it must match this design EXACTLY:
+Make me a Microsoft PowerPoint (.pptx) presentation, 11 slides. This is a practical
+runbook talk for my robotics lab: by the end, anyone with an NSF ACCESS allocation should
+be able to run THEIR OWN training job this week by copying my commands. Show real commands
+in code blocks on the slides — that is the point of this deck. Anything in <ANGLE_BRACKETS>
+is where they substitute their own project's values.
 
-DESIGN:
+DESIGN (must match my other deck EXACTLY):
 - Clean white background, dark navy text (#1B2430), safety-orange accent (#D9560B) for titles/highlights
-- One idea per slide, max 4 bullets, big readable text (min 18pt body)
-- Numbers and metrics in a monospace font, bold
+- Code blocks in monospace on a very light gray panel, minimum 14pt
+- Max 4 bullets or 1 code block per slide, big readable text
 - No clipart, no emoji, no gradients
 
-CONTENT — "Training on NSF ACCESS: lab → supercomputer → lab in one evening":
+CONTENT — "Training on NSF ACCESS: the copy-paste runbook":
 
-Slide 1 (what + why): NSF ACCESS = free, proposal-based time on national supercomputers. We use DeltaAI (NCSA, GH200 GPU nodes). Rule of thumb: local machine develops and deploys, the cluster trains. Our whole project used ~2% of a small allocation.
+Slide 1 (title + promise): "From Your Lab to a Supercomputer and Back — every command included."
+NSF ACCESS = free, proposal-based GPU time on national supercomputers (DeltaAI, Bridges-2, Anvil, Expanse...).
+Worked example throughout: our robot policy — 229 episodes up, trained policy back, ~1.5 GPU-hours.
+Rule: local machine = develop + deploy; cluster = train.
 
-Slide 2 (the pipeline): prepare dataset locally → rsync up (Duo once, then a persistent SSH socket) → one-time environment setup → sbatch training job → rsync the trained policy back. First trip: one evening. Every trip after: ~20 minutes of attention. Draw as a simple 5-step flow.
+Slide 2 (know your machine — fill this table FIRST):
+| Login hostname | from the resource's user guide (NOT guessable) | dtai-login.delta.ncsa.illinois.edu |
+| Username | your ACCESS mapping | <YOUR_USERNAME> |
+| Slurm account | run `accounts` after login | looks like abcd-dtai-gh |
+| GPU partition | user guide or `sinfo` | ghx4 |
+| CPU architecture | `uname -m` | aarch64 — ARM! changes all of Python packaging |
 
-Slide 3 (the 4 pitfalls we hit, so you don't): ARM CPUs mean pip installs a CPU-only torch (use the site's module); newest module ≠ best (an API we needed was removed); always "module load cuda"; the framework tried to upload our model to a public hub and killed the job in 33s (one flag fixes it).
+Slide 3 (one-time: no-hassle login). Add to ~/.ssh/config:
+```
+Host deltaai
+  HostName dtai-login.delta.ncsa.illinois.edu
+  User <YOUR_USERNAME>
+  ControlMaster auto
+  ControlPath ~/.ssh/cm-%r@%h-%p
+  ControlPersist 12h
+```
+Then `ssh deltaai exit` = password + Duo ONCE; every later ssh/rsync/sbatch reuses the
+socket for 12 hours with no re-auth. This one block is what makes overnight automation possible.
 
-Slide 4 (the 5-second rule): before submitting any overnight job, load ONE data sample interactively on the login node — it exercises the exact code path the job runs and catches ~90% of failures before the queue. Never trust an overnight job you haven't smoke-tested.
+Slide 4 (push your data up):
+```
+rsync -avz --progress <LOCAL_DATA_DIR>/ deltaai:~/<REMOTE_DATA_DIR>/
+```
+rsync is incremental — rerun anytime, only new files transfer. Sanity-check the dataset
+locally FIRST: never debug a broken dataset through a Slurm queue.
 
-Slide 5 (results + automation): 150k training steps in ~1.5 hours on one GH200. The whole cycle is now ONE script: audit the data → push → train → pull → verify, riding a single morning login. The measured outcome of the policies it trained is in the previous deck (97/100).
+Slide 5 (one-time environment — the pattern that works on ARM):
+```
+module avail python pytorch cuda     # ALWAYS look first — use what the site maintains
+module purge
+module load python/miniforge3_pytorch/2.7.0   # site module = compiled GPU stack
+module load cuda
+python -m venv --system-site-packages ~/<PROJECT>_env   # KEY FLAG: layer on module torch
+source ~/<PROJECT>_env/bin/activate
+pip install <YOUR_PACKAGES>          # pure-Python deps only; PIN data-format versions
+python -c "import torch; print(torch.version.cuda)"     # must NOT print None
+```
+Pattern: the site module supplies torch+CUDA; your venv layers project packages on top.
+
+Slide 6 (the 4 pitfalls we hit — so you don't):
+| torch.version.cuda = None | pip installed a CPU wheel (ARM) | use the module's torch |
+| API missing (VideoReader) | NEWEST module too new — API removed | load an OLDER version |
+| lib*.so not found | CUDA toolkit not loaded | module load cuda |
+| job dies in 33 s | framework tried to upload to a public hub | our flag: --policy.push_to_hub=false — read YOUR framework's defaults |
+
+Slide 7 (the 5-second test that saves the night). On the login node, BEFORE submitting:
+```
+python -c "<load ONE sample of YOUR data through YOUR library>"
+# ours: ds = LeRobotDataset('magpie/v1', root='$HOME/lerobot_v1'); ds[0]  # forces real video decode
+```
+Exercises the exact code path the job will run. Caught a failure that would have crashed at 2 a.m.
+Catches ~90% of first-job failures. Never trust an overnight job you haven't smoke-tested.
+
+Slide 8 (the Slurm job — our actual working file, adapt the last line to your project):
+```
+#!/usr/bin/env bash
+#SBATCH --account=<YOUR_ACCOUNT>      # from `accounts`
+#SBATCH --partition=ghx4
+#SBATCH --gpus-per-node=1
+#SBATCH --time=10:00:00               # generous but honest; shorter queues faster
+#SBATCH --output=train_%j.log
+set -euo pipefail
+module purge && module load python/miniforge3_pytorch/2.7.0 cuda   # SAME stack as setup
+source ~/<PROJECT>_env/bin/activate
+python -m <YOUR_TRAINING_COMMAND> --checkpoint_every <N>
+```
+Jobs start from a clean shell — the module loads MUST be repeated inside the script.
+Checkpoint often: a killed job with checkpoints is still a result.
+
+Slide 9 (submit + babysit for exactly 2 minutes):
+```
+sbatch train.slurm
+squeue -u $USER          # PD = queued, R = running (1-GPU jobs start in minutes)
+tail -f train_*.log      # WAIT until real progress lines tick, then log out
+```
+Healthy = loss lines ticking. Instant traceback = fix NOW, not tomorrow. sbatch jobs
+survive logout. Our numbers: 0.037 s/step on a GH200 → 150k steps ≈ 1.5 h.
+
+Slide 10 (pull results home + verify). From YOUR machine (not inside the ssh session):
+```
+rsync -avz deltaai:<RUN_DIR>/checkpoints/last/ ~/models/<NAME>/
+python -c "<load the checkpoint and print param count>"   # verify BEFORE deploying
+```
+Then verify offline against held-out data before touching hardware — our replay test
+measured 1.9 mm error and told us the model was fine before the robot ever moved.
+
+Slide 11 (the end state — one command, overnight):
+```
+ssh deltaai exit                      # Duo once, before leaving the lab
+nohup bash auto_train_cycle.sh v1 150000 &
+```
+Our script chains: data audit gate → rsync push → remote smoke test → sbatch → poll →
+pull → local load test. Leave at 6 pm, arrive to a trained, verified policy.
+Adapt point for YOUR project: replace two things only — the audit check and the train command.
+The policies this trained scored 97/100 on hardware (see my other deck).
 
 Add one-sentence speaker notes per slide.
 ```
