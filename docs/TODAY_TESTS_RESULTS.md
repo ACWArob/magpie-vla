@@ -69,6 +69,35 @@ deployment is detector-free. Gemini's 6.5 s is a network round-trip — unusable
 
 ---
 
+## Test 2b — Judge determinism (gate 7, no robot)
+
+**Setup:** 6 recorded grasp images scored 5× each at temperature 0 (a *simplified* one-line
+rubric — not the full production judge prompt). Reports the per-image score spread.
+
+| Image | Score spread across 5 calls |
+|---|---|
+| img_003 | 0.08 |
+| img_060 | **0.00** |
+| img_120 | 0.03 |
+| img_151 | **0.25** |
+| img_183 | 0.05 |
+| img_215 | **0.00** |
+
+- Max spread **0.25**, mean **0.068**, only 2/6 fully identical.
+
+**Finding — temperature=0 is *mostly* but NOT perfectly deterministic.** The gate-7 claim
+("temperature=0 → same image, same score") is **partially violated**: one image swung 0.25
+across identical calls. Why it matters: an episode whose score sits near the 0.6 gate could
+flip keep/reject on re-scoring. **Caveat:** this probe used a simplified prompt; the
+*production* judge also pins `thinking_budget=0` (which this test did not), so the real gate
+is likely tighter — but the honest conclusion is **the reward gate is not bit-exact
+reproducible, and the near-0.6 band is where that residual noise bites.** This is exactly the
+kind of thing a workshop reviewer respects seeing measured rather than assumed.
+
+## Test 2c — Ensembling A/B (gate 13) — *pending*
+
+Not yet run. No robot, ~10 min. Fill in when it completes: `data/ensembling_ab.json`.
+
 ## What these two tests bought
 
 | Claim | Before today | Now (measured) |
@@ -78,10 +107,10 @@ deployment is detector-free. Gemini's 6.5 s is a network round-trip — unusable
 | fixed-90° (V0) is systematically wrong | narrated | **22.5° median error — the freeze cause quantified** |
 | depth-PCA broken by IR stripes | observed | **12.7° — worst of the five** |
 | Detectors on live frames | offline only | **all 36/36; SAM3 1.1 s, HSV 1 ms confirmed live** |
+| Reward-gate determinism | assumed bit-exact | **NOT — max 0.25 score spread at temp=0 (gate 7 partial)** |
 
-**Not run today:** T2b (judge determinism) and T2c (ensembling A/B) — no-robot, ~15 min,
-still queued. OOD ring is 15/24; the remaining 9 combos would only sharpen an already-clear
-cliff.
+**Still pending:** T2c (ensembling A/B) — no-robot, ~10 min. OOD ring is 15/24; the
+remaining 9 combos would only sharpen an already-clear cliff.
 
 *Raw data: `data/v1_ood_ring.json`, `data/appendix_bakeoff.json`. act_v1 and its results
 untouched — both tests wrote their own files.*
