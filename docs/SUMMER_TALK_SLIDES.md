@@ -137,7 +137,25 @@ IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 
 ---
 
-## Slide 13 — The three failures: all at 0° — and we predicted them (6:45)
+## Slide 13 — Where the scores come from: two scorekeepers, zero humans (6:45)
+**Scorekeeper 1 — during COLLECTION (curates the data): a vision-language model**
+- Shown photos of the grasp (at close + after lift), asked — real prompt, condensed:
+  *"From the after-lift image, is the object still held? SCORE 0.0–1.0. Name the primary
+  problem (none / angle / placement / centering / stability). Measure how the object sits
+  between the fingers…"* — temperature 0, so the same photos always score the same
+- Episode kept ONLY if physically held **and** score ≥ 0.6 · mean kept score: 0.865
+
+**Scorekeeper 2 — during EVALUATION (grades the policy): pure arithmetic, no AI**
+- start at 1.0 → **−0.1** per extra close attempt → up to **−0.4** for gripper-vs-block
+  angle error → **−0.2** if not seated (finger gap outside 20–40 mm) → **0** if it doesn't
+  survive the 8 cm lift
+- **The 0.70 = the average of 100 such grades.** Every input is a sensor reading
+
+*Speaker notes: 40 seconds — this slide answers "where does 0.70 come from" before anyone asks. The punchline matters for credibility: the headline numbers (97/100, grade 0.70) contain NO learned or VLM component — pure measured physics — so "the AI graded itself" is not a possible objection. The VLM only curates training data upstream, and even there it's anchored to a physical fact (the block stayed held or it didn't).*
+
+---
+
+## Slide 14 — The three failures: all at 0° — and we predicted them (7:16)
 - The dataset audit had flagged "0° bin LOW" before training — we misread it as benign
 - All 3 failures at 0°, two rotated ~41° off before grasping
 - 0° *succeeds* 88% of the time but at 0.58 quality — **success-rate alone would have hidden this; the grading exposed it**
@@ -148,7 +166,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 14 — Root cause: one discontinuity (7:16)
+## Slide 15 — Root cause: one discontinuity (7:47)
 - A square block at 0° and 90° is the SAME scene — but the angle code works modulo 90, which is discontinuous at that boundary: a straight block reads 0.3° or 89.7° on pixel noise alone
 - So the expert demonstrated BOTH "stay" and "rotate 90°" on identical scenes: **47 episodes vs 15 — perfectly bimodal**
 - Imitation averaged the two modes → the ~43° freeze
@@ -157,7 +175,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 15 — Finding #2 (the one that generalizes): offline metrics are blind to this (7:47)
+## Slide 16 — Finding #2 (the one that generalizes): offline metrics are blind to this (8:18)
 - Replay error: 1.8 mm — clean. Chunk-level probes from the ambiguous start frames: predict the CORRECT angle even on 0° episodes
 - **No offline metric we could construct shows the defect.** It exists only closed-loop
 - ⇒ dataset distribution audits + graded hardware evaluation are load-bearing; offline accuracy is necessary but cannot catch mode-averaging
@@ -166,21 +184,12 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 16 — The fix, pre-registered (8:18)
+## Slide 17 — The fix, pre-registered (8:49)
 - Boundary canonicalization (one rule: near-90° readings on symmetric objects execute as ≈0°) + the angle-consistency gate now actually enforced + ~50 replacement episodes
 - Success criteria written down BEFORE running: 0°→25/25, grade ≥0.75, zero regression elsewhere
 - Re-run the identical 100-grasp instrument → before/after heat-maps *(insert result if run by talk day)*
 
 *Speaker notes: 30 seconds. "Pre-registering the criteria keeps us honest — the fix has to clear a bar we set before seeing its results." If V1.1 results exist by the talk: THIS becomes the closing money slide.*
-
----
-
-## Slide 17 — Everything is a measured decision (8:49)
-- Every fork of the summer — which detector, which grasp planner, which architecture, why no temporal ensembling — recorded as chosen-vs-rejected WITH the number that decided it
-
-IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/appendix/gate_scoreboard.png
-
-*Speaker notes: 25 seconds, light touch: "I won't walk through it — the point is the habit. Every 'why did you use X' has a quantitative answer." It's also the appendix of the workshop paper in progress.*
 
 ---
 
@@ -193,6 +202,15 @@ IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 [VIDEO: closing 10s — best rotated-block pick, full speed]
 
 *Speaker notes: End at ~9:30, leaving buffer. Last line: "The robot's data got better because we measured why it was bad — that's the whole method." Questions.*
+
+---
+
+## Backup slide — Everything is a measured decision (8:49)
+- Every fork of the summer — which detector, which grasp planner, which architecture, why no temporal ensembling — recorded as chosen-vs-rejected WITH the number that decided it
+
+IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/appendix/gate_scoreboard.png
+
+*Speaker notes: 25 seconds, light touch: "I won't walk through it — the point is the habit. Every 'why did you use X' has a quantitative answer." It's also the appendix of the workshop paper in progress.*
 
 ---
 
