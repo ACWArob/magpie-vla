@@ -94,9 +94,30 @@ is likely tighter — but the honest conclusion is **the reward gate is not bit-
 reproducible, and the near-0.6 band is where that residual noise bites.** This is exactly the
 kind of thing a workshop reviewer respects seeing measured rather than assumed.
 
-## Test 2c — Ensembling A/B (gate 13) — *pending*
+## Test 2c — Ensembling A/B (gate 13) — the honest surprise
 
-Not yet run. No robot, ~10 min. Fill in when it completes: `data/ensembling_ab.json`.
+**Setup:** replay act_v1 over 1349 consecutive frames, two configs: A = chunk 10, no
+ensembling (deployed); B = n_action_steps 1 + temporal ensembling.
+
+| Config | Rotation error (median) | p95 |
+|---|---|---|
+| No ensembling (deployed) | 0.74° | 1.78° |
+| Temporal ensembling | **0.61°** | 1.66° |
+
+Ratio: **0.8× — ensembling is marginally BETTER on replay, not 3× worse.**
+
+**This did NOT reproduce the "3× worse" claim — and that's the point.** The original
+finding was a *live-deployment* pathology: ensembling averages rotation vectors across
+chunks, invalid near the 180° branch cut, causing lurches. Offline replay runs on smooth
+training trajectories that never approach those branch cuts, so it can't see the failure —
+**exactly like replay couldn't see the aliasing (§Finding #2 of the eval report).** The
+no-ensembling deployment decision stands on the live observation; this test *confirms the
+meta-point that offline replay is blind to deployment-specific failure modes* rather than
+overturning the decision.
+
+Correction made: the gate-13 scoreboard bar previously showed a "3× worse" that was the
+deployment claim drawn as if it were replay data — now shows the real A/B (0.74 vs 0.61)
+with the deployment caveat labelled.
 
 ## What these two tests bought
 
@@ -108,9 +129,12 @@ Not yet run. No robot, ~10 min. Fill in when it completes: `data/ensembling_ab.j
 | depth-PCA broken by IR stripes | observed | **12.7° — worst of the five** |
 | Detectors on live frames | offline only | **all 36/36; SAM3 1.1 s, HSV 1 ms confirmed live** |
 | Reward-gate determinism | assumed bit-exact | **NOT — max 0.25 score spread at temp=0 (gate 7 partial)** |
+| Ensembling 3× worse | drawn on scoreboard as replay | **replay says 0.8× — the 3× is deploy-only, not replay-visible (gate 13 corrected)** |
 
-**Still pending:** T2c (ensembling A/B) — no-robot, ~10 min. OOD ring is 15/24; the
-remaining 9 combos would only sharpen an already-clear cliff.
+**All of today's tests are in.** OOD ring is 15/24; the remaining 9 combos would only
+sharpen an already-clear cliff. Two honest corrections landed today (gate 7 not bit-exact,
+gate 13 replay ≠ deployment) — both strengthen the paper's core thesis that offline metrics
+miss deployment-specific behaviour.
 
 *Raw data: `data/v1_ood_ring.json`, `data/appendix_bakeoff.json`. act_v1 and its results
 untouched — both tests wrote their own files.*
