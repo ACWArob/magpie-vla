@@ -39,6 +39,7 @@ after each policy's grid evaluation. Companion docs: [V0_ANALYSIS.md](V0_ANALYSI
 | | **V0 policy** | **V1 policy** |
 |---|---|---|
 | **Overall** | n/a (not measured systematically) | **97/100 (97%), mean grade 0.70** |
+| **Out-of-distribution (±9cm ring)** | — | **13% (2/15) — hard extrapolation cliff** |
 | In-zone straight block (0°) | reliable picks (incl. off-center visual tracking) | 88% — all 3 run failures here (0/90 aliasing, grade 0.58) |
 | Rotated block (25–70°) | **froze** (mode averaging) | **100% (75/75) — the headline result** |
 | Boundary cells (±6cm) | miss (descent regressed to training mean) | **97% at the 6 cm ring** (no spatial falloff) |

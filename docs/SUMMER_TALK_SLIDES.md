@@ -155,6 +155,17 @@ IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 
 ---
 
+## Slide 11b — But where does it STOP working? (the competence boundary)
+- I tested one grid-step OUTSIDE the training zone (±9 cm instead of ±6 cm)
+- **97% inside → 13% outside.** A hard cliff, not a gentle fade
+- The policy interpolates within its data and does not extrapolate past it — 9 cm is well within the arm's reach, so this is a *learned* limit, not a mechanical one
+
+IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/appendix/ood_ring.png
+
+*Speaker notes: 30 seconds. This is the honest boundary of the result — and it's WHY the systematic grid matters: the grid is exactly the region the policy works in. "To make the workspace bigger, you don't hope for generalization — you collect more grid." Ties the coverage design to a measured limit.*
+
+---
+
 ## Slide 14 — The three failures: all at 0° — and we predicted them (7:16)
 - The dataset audit had flagged "0° bin LOW" before training — we misread it as benign
 - All 3 failures at 0°, two rotated ~41° off before grasping

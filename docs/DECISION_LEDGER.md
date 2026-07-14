@@ -44,7 +44,7 @@ with GraspGenX (1.8 GB) inside the 8 GB budget — measured, not estimated.
 
 | Rejected | Why |
 |---|---|
-| Depth (3D) PCA | [MEASURED] RealSense IR stripe artifacts corrupt the depth on flat surfaces → 3D principal axes swing wildly frame to frame; the 2D mask fix was confirmed on a cube at 45° (2026-06). |
+| Depth (3D) PCA | [MEASURED — live bake-off 2026-07-14] **12.7° median angle error vs ground truth** (worst of 5 methods); RealSense IR stripes corrupt depth on flat surfaces; minAreaRect (4.5°) is 2.8× better on the same placements. |
 | Bare centroid (no orientation) | [MEASURED] this IS the V0 behaviour: no angle authority → 42/62 episodes grasped at ~90° → the policy froze on rotated blocks. Eval confirms: a fixed-90° strategy's angle error grows linearly with block rotation (→ bake-off fig C). |
 
 ## Gate 4 — Grasp planner
@@ -68,8 +68,10 @@ interface for a custom gripper. [MEASURED] 1.8 GB VRAM measured alongside SAM3 �
 | Gemini arbiter | [MEASURED] the V0 smoking gun: arbiter chose ~90° regardless of block angle → **71% of the dataset in one angle bin** → mode-averaging froze the policy on rotated blocks (V0_ANALYSIS fig 1). Also non-deterministic across calls. |
 | mask-PCA alone | [MEASURED — OFFLINE_TEST_REPORT §5] frame-to-frame jitter 1.65° median / **12.39° p90** vs minAreaRect's 0.31°/0.47° on identical frames; PCA-vs-rect disagree 12.7° median on the same mask (near-square ill-conditioning) while rect is detector-independent to 0.3°. |
 
-**Result of the fix:** [MEASURED] worst angle bin 71% → **19.7%** in V1; deploy eval:
-75/75 on rotated blocks.
+**Result of the fix:** [MEASURED] worst angle bin 71% → **19.7%** in V1; deploy eval 75/75
+on rotated blocks. **Live accuracy vs ground truth (bake-off 2026-07-14, 36 placements):
+minAreaRect 4.5° ≪ mask-PCA 11.5° ≈ GraspGenX 11.5° < depth-PCA 12.7° < fixed-90° 22.5°** —
+minAreaRect decisively best; fixed-90° (V0) being 22.5° off IS the freeze mechanism.
 
 ## Gate 6 — Grip force
 **Options:** fixed force · **DeliGrasp (VLM physics priors) + measured width** ✔
@@ -106,7 +108,9 @@ what it rejects matters (angle-inconsistent supervision).
 | Random scatter | [MEASURED] V0: 71% angle collapse + misses beyond the ±4 cm scatter. Interpolation-only generalization measured on hardware. |
 | QT-Opt-scale random | [MEASURED] works at 100k+ grasps — 3 orders of magnitude more robot-hours than our budget (229 episodes, 3.4 h). |
 
-**Result:** [MEASURED] V1 eval shows NO spatial falloff (97% at the 6 cm ring).
+**Result:** [MEASURED] V1 eval shows NO spatial falloff (97% at the 6 cm ring). **And a hard
+extrapolation cliff (OOD ring 2026-07-14): 97% in-zone → 13% at the ±9 cm ring, one grid step
+out** — the grid is exactly the competence region; extend the workspace = extend the data.
 
 ## Gate 10 — Action space
 **Options:** binary gripper · **aperture-mm continuous** ✔
