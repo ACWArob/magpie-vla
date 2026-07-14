@@ -1,6 +1,6 @@
 # AutoGrasp — Summer Research Talk (10 min) — Slide Deck Source
 
-> 17 slides ≈ 33 s each (60 s for the background slide) ≈ 9.6 min + questions. AUDIENCE: assume no robotics/ML background — slide 2 carries the vocabulary. Format: `## Slide N` blocks — title,
+> 18 slides ≈ 31 s each (60 s for the background slide) ≈ 9.8 min + questions. AUDIENCE: assume no robotics/ML background — slide 2 carries the vocabulary. Format: `## Slide N` blocks — title,
 > bullets, speaker notes — paste into Gemini/Claude/Slides as-is.
 > Framing: a RESEARCH TIMELINE (what I asked → what I measured → what I learned),
 > not a systems walkthrough. Image URLs are live (public repo). `[VIDEO]` = your saved clips.
@@ -37,7 +37,7 @@
 
 ---
 
-## Slide 4 — May–June: the platform (2:08)
+## Slide 4 — May–June: the platform (2:06)
 - ROS2 stack: UR5e arm, custom 2-finger gripper (hobby servos — they fight back), wrist RGBD, force-torque
 - Perception on an 8 GB GPU: SAM3 text-query segmentation + GraspGenX grasp proposals — coexisting in VRAM by measurement, not hope
 - Everything driven from notebooks; every sensor's poll rate measured before trusting it (June 17 update)
@@ -48,7 +48,7 @@ IMAGE (right half): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 
 ---
 
-## Slide 5 — Late June: AutoGrasp, the data engine (2:41)
+## Slide 5 — Late June: AutoGrasp, the data engine (2:37)
 - A scripted expert picks the object: segment → center → choose grasp angle from geometry → force-controlled close → verified lift
 - **The reward gate — the idea I care about**: an episode enters the dataset ONLY if
   (a) the object measurably stayed held through the lift, AND (b) a vision-language judge scores the grasp ≥ 0.6
@@ -60,7 +60,7 @@ IMAGE (right half): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 
 ---
 
-## Slide 6 — July 7: first policy — and the first lesson (3:14)
+## Slide 6 — July 7: first policy — and the first lesson (3:08)
 - 60 episodes, randomly placed → ACT policy (51.6M), trained on an NSF supercomputer in 62 minutes
 - Same-day deployment: autonomous visual picks on the real arm ✓
 - Offline replay error: **1.9 mm** — the model imitates its data almost perfectly
@@ -70,7 +70,16 @@ IMAGE (right half): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 
 ---
 
-## Slide 7 — Finding #1: policies interpolate; they don't extrapolate (3:47)
+## Slide 7 — What does "training" actually optimize? (the metric) (3:39)
+- The network is trained to minimize **imitation error**: for each moment in a demonstration, predict the next ~10 seconds of motion — the loss is the **distance between predicted and demonstrated actions** (arm pose + gripper aperture, an L1 loss)
+- What we watch during training: the loss curve (ours converges ~0.04 in normalized units) — and after training, **replay error in physical units**: median **1.8 mm position / 1.1° rotation / 0.16 mm gripper** against held-out demonstration frames
+- **The catch (remember this)**: both numbers measure *how well the policy copies* — neither measures whether the task succeeds
+
+*Speaker notes: 35 seconds. This slide earns its place twice: (1) the audience needs to know what the number being optimized IS — "distance to the demonstrated motion, nothing about success or reward"; (2) it plants the bomb that goes off twice later — a policy can copy near-perfectly and still fail (slide 8), and copying-accuracy metrics are provably blind to the failure we found (slide 15). Say the last bullet slowly.*
+
+---
+
+## Slide 8 — Finding #1: policies interpolate; they don't extrapolate (4:10)
 - Picks succeed ONLY inside the training placement zone; beyond it, the descent regresses to the training mean → miss
 - And on rotated blocks the policy **froze completely**
 - Forensics: **71% of all training grasps executed at ~90°** regardless of block angle — when demonstrations disagree, imitation averages them into inaction
@@ -81,7 +90,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/v0/
 
 ---
 
-## Slide 8 — July 8: design the data like an experiment (4:20)
+## Slide 9 — July 8: design the data like an experiment (4:41)
 | Measured V0 defect | V1 design response |
 |---|---|
 | interpolation-only | 5×5 grid × 7 angles + jitter — designed support |
@@ -94,7 +103,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/v0/
 
 ---
 
-## Slide 9 — The action-space point (worth its own 30 seconds) (4:53)
+## Slide 10 — The action-space point (worth its own 30 seconds) (5:12)
 - The old action space was gripper open/close (binary). The expert physically pre-positions its fingers — the policy **could not even represent** that event
 - New: gripper aperture in millimeters as a continuous action
 - The trained policy then reproduced the pre-positioning staircase ON ITS OWN — nobody coded it
@@ -105,7 +114,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 10 — Measuring properly: the evaluation instrument (5:26)
+## Slide 11 — Measuring properly: the evaluation instrument (5:43)
 - 100 grasps, fully unattended: 25 positions × 4 block angles, the SAME grid as collection
 - Success requires surviving an 8 cm lift; every grasp GRADED 0–1 (alignment, seating, retries)
 - Hardware faults are quarantined (reboot + retry, never recorded) — a dying gripper once wrote 36 fake "policy failures" in an hour
@@ -116,7 +125,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 11 — July 13: the result (5:59)
+## Slide 12 — July 13: the result (6:14)
 - **97 / 100 picks** (95% CI 91.5–99.0) · mean grade 0.70
 - **Rotated blocks: 75/75 — the exact case the first policy froze on**
 - No spatial falloff: 97% at the workspace edge
@@ -128,7 +137,7 @@ IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 
 ---
 
-## Slide 12 — The three failures: all at 0° — and we predicted them (6:32)
+## Slide 13 — The three failures: all at 0° — and we predicted them (6:45)
 - The dataset audit had flagged "0° bin LOW" before training — we misread it as benign
 - All 3 failures at 0°, two rotated ~41° off before grasping
 - 0° *succeeds* 88% of the time but at 0.58 quality — **success-rate alone would have hidden this; the grading exposed it**
@@ -139,7 +148,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 13 — Root cause: one discontinuity (7:05)
+## Slide 14 — Root cause: one discontinuity (7:16)
 - A square block at 0° and 90° is the SAME scene — but the angle code works modulo 90, which is discontinuous at that boundary: a straight block reads 0.3° or 89.7° on pixel noise alone
 - So the expert demonstrated BOTH "stay" and "rotate 90°" on identical scenes: **47 episodes vs 15 — perfectly bimodal**
 - Imitation averaged the two modes → the ~43° freeze
@@ -148,7 +157,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 14 — Finding #2 (the one that generalizes): offline metrics are blind to this (7:38)
+## Slide 15 — Finding #2 (the one that generalizes): offline metrics are blind to this (7:47)
 - Replay error: 1.8 mm — clean. Chunk-level probes from the ambiguous start frames: predict the CORRECT angle even on 0° episodes
 - **No offline metric we could construct shows the defect.** It exists only closed-loop
 - ⇒ dataset distribution audits + graded hardware evaluation are load-bearing; offline accuracy is necessary but cannot catch mode-averaging
@@ -157,7 +166,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 15 — The fix, pre-registered (8:11)
+## Slide 16 — The fix, pre-registered (8:18)
 - Boundary canonicalization (one rule: near-90° readings on symmetric objects execute as ≈0°) + the angle-consistency gate now actually enforced + ~50 replacement episodes
 - Success criteria written down BEFORE running: 0°→25/25, grade ≥0.75, zero regression elsewhere
 - Re-run the identical 100-grasp instrument → before/after heat-maps *(insert result if run by talk day)*
@@ -166,7 +175,7 @@ IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/app
 
 ---
 
-## Slide 16 — Everything is a measured decision (8:44)
+## Slide 17 — Everything is a measured decision (8:49)
 - Every fork of the summer — which detector, which grasp planner, which architecture, why no temporal ensembling — recorded as chosen-vs-rejected WITH the number that decided it
 
 IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/appendix/gate_scoreboard.png
@@ -175,7 +184,7 @@ IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 
 ---
 
-## Slide 17 — Summary + what's next (9:17)
+## Slide 18 — Summary + what's next (9:20)
 - **A robot collected 43 minutes of its own data, judged it itself, and the resulting policy picks at 97%** — including the rotations its predecessor failed
 - The best result was a failure: predicted by an audit, invisible offline, root-caused to one line
 - Next: workshop paper (drafted) · multi-object + placement (the strawberry test) · continual-learning memory on top of this loop
