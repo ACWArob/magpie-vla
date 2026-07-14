@@ -23,7 +23,7 @@ end-to-end record — every stage, option explored, and failure→fix:
 |---|---|
 | **V0 collection** (random scatter, 60 eps) | [notebooks/v0_collect.ipynb](notebooks/v0_collect.ipynb) |
 | **V1 collection** (5×5 grid × 7 angles, aperture-mm actions, angle contract, ~225 eps) | [notebooks/v1_collect.ipynb](notebooks/v1_collect.ipynb) |
-| **Training on NSF ACCESS (DeltaAI)** — validated runbook, ARM pitfalls, slurm job | [docs/NSF_TRAINING.md](docs/NSF_TRAINING.md) · slides template: [docs/NSF_ACCESS_SLIDES.md](docs/NSF_ACCESS_SLIDES.md) |
+| **Training on NSF ACCESS (DeltaAI)** | step-by-step tutorial: [docs/NSF_TUTORIAL.md](docs/NSF_TUTORIAL.md) · terse runbook: [docs/NSF_TRAINING.md](docs/NSF_TRAINING.md) · slides: [docs/NSF_ACCESS_SLIDES.md](docs/NSF_ACCESS_SLIDES.md) |
 | **Deployment** — 10 Hz closed-loop ACT with safety envelope | [notebooks/v0_test.ipynb](notebooks/v0_test.ipynb) |
 | **Results & analysis** | [docs/V1_EVAL_REPORT.md](docs/V1_EVAL_REPORT.md) (97/100) · [docs/OFFLINE_TEST_REPORT.md](docs/OFFLINE_TEST_REPORT.md) · [docs/V0_ANALYSIS.md](docs/V0_ANALYSIS.md) · research: [docs/V1_data_research.md](docs/V1_data_research.md) |
 | **Decisions & paper** | [docs/DECISION_LEDGER.md](docs/DECISION_LEDGER.md) (every gate + scoreboard) · [docs/WORKSHOP_PAPER_DRAFT.md](docs/WORKSHOP_PAPER_DRAFT.md) · [docs/V1_1_PLAN.md](docs/V1_1_PLAN.md) · [docs/EXECUTION_PLAN.md](docs/EXECUTION_PLAN.md) |

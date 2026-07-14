@@ -1,5 +1,8 @@
 # Training a V0 Policy on NSF ACCESS (DeltaAI) — Standalone Guide
 
+> Learning it for the first time? Start with **[NSF_TUTORIAL.md](NSF_TUTORIAL.md)** —
+> step-by-step with every command component explained. This file is the terse runbook.
+
 End-to-end: collected episodes on the lab PC → trained ACT policy from DeltaAI.
 No Claude required. Assumes the dataset already exists at `~/magpie_control/data/lerobot_v0`
 (created by `magpie_collect.ipynb` — cells 7/8 or the AUTO-COLLECT cell).
