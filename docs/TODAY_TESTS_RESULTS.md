@@ -8,19 +8,23 @@
 ## Test 1 — Out-of-distribution ring (the extrapolation question)
 
 **Setup:** the ±9 cm ring — one 3 cm grid step *outside* everything the policy trained on
-(training support ends at ±6 cm) — graded on the identical 100-grasp instrument. 15 of the
-24 ring combos ran before the arm driver dropped; enough to answer the question.
+(training support ends at ±6 cm) — 24 ring positions × 4 angles = 96 rollouts, graded on
+the identical instrument.
 
 ![OOD ring](figures/appendix/ood_ring.png)
 
 | | In-zone (±6 cm, trained) | **OOD ring (±9 cm)** |
 |---|---|---|
-| Pick success | 97% (75/75 rotated) | **13% (2/15)** |
-| Mean grade | 0.70 | **0.08** |
+| Pick success | 97% (75/75 rotated) | **8% (8/96)** |
+| Mean grade | 0.70 | **~0.08** |
 
 **The finding — a hard extrapolation cliff.** One grid step past the training support and
-the policy collapses from 97% to 13%. The 2 picks that survived (‑9,‑6 @70° grade 0.55;
-‑9,‑3 @45° grade 0.67) were edge/partial grabs, not clean. This is the **measured boundary
+the policy collapses from 97% to **8% (8/96)**. Crucially, the handful that succeeded were
+*rotated* placements whose detected centroid fell back CLOSE to the trained zone — i.e. they
+were not truly out-of-distribution. Genuinely-OOD positions are ~0%. This directly motivates
+the input-ablation next step (drop absolute x/θ from the state input → force reliance on the
+position-invariant wrist view). The 8 picks that survived were
+rotated/edge cases, not clean center grabs. This is the **measured boundary
 of the policy's competence** and it confirms the V0 lesson at V1 scale: **these policies
 interpolate within their data support and do not extrapolate beyond it.** 9 cm is inside the
 arm's reach and the deploy safety box, so this is a *learned* limit, not a mechanical one.
@@ -123,7 +127,7 @@ with the deployment caveat labelled.
 
 | Claim | Before today | Now (measured) |
 |---|---|---|
-| Policy competence has a hard support boundary | assumed from V0 | **97% → 13% at one step past ±6 cm** |
+| Policy competence has a hard support boundary | assumed from V0 | **97% → 8% (8/96) at one step past ±6 cm** |
 | minAreaRect beats other angle methods on *accuracy* | had consistency only | **4.5° vs 11–22° vs ground truth** |
 | fixed-90° (V0) is systematically wrong | narrated | **22.5° median error — the freeze cause quantified** |
 | depth-PCA broken by IR stripes | observed | **12.7° — worst of the five** |
@@ -131,8 +135,7 @@ with the deployment caveat labelled.
 | Reward-gate determinism | assumed bit-exact | **NOT — max 0.25 score spread at temp=0 (gate 7 partial)** |
 | Ensembling 3× worse | drawn on scoreboard as replay | **replay says 0.8× — the 3× is deploy-only, not replay-visible (gate 13 corrected)** |
 
-**All of today's tests are in.** OOD ring is 15/24; the remaining 9 combos would only
-sharpen an already-clear cliff. Two honest corrections landed today (gate 7 not bit-exact,
+**All of today's tests are in.** OOD ring completed at 8/96. Two honest corrections landed today (gate 7 not bit-exact,
 gate 13 replay ≠ deployment) — both strengthen the paper's core thesis that offline metrics
 miss deployment-specific behaviour.
 

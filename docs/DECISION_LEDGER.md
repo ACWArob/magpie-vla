@@ -109,8 +109,8 @@ what it rejects matters (angle-inconsistent supervision).
 | QT-Opt-scale random | [MEASURED] works at 100k+ grasps — 3 orders of magnitude more robot-hours than our budget (229 episodes, 3.4 h). |
 
 **Result:** [MEASURED] V1 eval shows NO spatial falloff (97% at the 6 cm ring). **And a hard
-extrapolation cliff (OOD ring 2026-07-14): 97% in-zone → 13% at the ±9 cm ring, one grid step
-out** — the grid is exactly the competence region; extend the workspace = extend the data.
+extrapolation cliff (OOD ring 2026-07-14): 97% in-zone → 8% (8/96) at the ±9 cm ring, one grid
+step out; the few successes were rotated so their centroid fell back near the trained zone** — the grid is exactly the competence region; extend the workspace = extend the data.
 
 ## Gate 10 — Action space
 **Options:** binary gripper · **aperture-mm continuous** ✔

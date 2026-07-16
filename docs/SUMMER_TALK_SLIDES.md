@@ -18,13 +18,16 @@
 
 ---
 
-## Slide 2 — Background: how robots learn from examples (60 seconds) (0:35)
-- A **robot policy** = a neural network: camera image in → motion command out, 10×/second
-- It learns by **imitation**: show it many examples of a task done right, it learns to copy — this is how most modern robot learning works (you may have heard "VLA models" — same family)
-- The usual price: a human **teleoperates** the robot for every single example — hundreds of demonstrations, hours of human time
+## Slide 2 — Background: how a robot learns to act (the 60-second primer) (0:35)
+- **How it acts (the process):** a robot "policy" is a **see → decide → move** loop — camera image in, motor command out, ~10× a second
+- **How it learns:** by **imitation** — copying many examples of the task done right (like learning to drive by watching, *not* by crashing). No trial-and-error, no reward tuning
+- **What a "VLA" is** (you may have heard the term): **Vision-Language-Action** — the popular kind also reads a text instruction ("pick up the red block"). Ours is a lean cousin called ACT, same family
+- **The catch:** every example normally comes from a **human teleoperating** the robot — hundreds of demos, hours of human time
 - **This summer's question: what if the robot makes its own examples — and can we make them GOOD?**
 
-*Speaker notes: 50-60 seconds, unhurried — everything later depends on these four ideas: policy, imitation, demonstrations, and "data quality decides everything." Explicitly say: "no reinforcement learning here, no reward shaping — just copying good examples. Which means the examples ARE the product."*
+IMAGE (fills the slide): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/talk/intro_vla.png
+
+*Speaker notes: 55-60 seconds, unhurried — the diagram carries it. Point at panel 1: "this is all the robot does — see, decide, move, ten times a second." Panel 2: "the models you've heard of, VLAs, also take a language command; ours is a simpler one in the same family." Then the punchline that sets up the whole talk: "it learns by copying examples — so the examples ARE the product. This summer was about the robot making its own."*
 
 ---
 
@@ -157,7 +160,7 @@ IMAGE (full width): https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/doc
 
 ## Slide 11b — But where does it STOP working? (the competence boundary)
 - I tested one grid-step OUTSIDE the training zone (±9 cm instead of ±6 cm)
-- **97% inside → 13% outside.** A hard cliff, not a gentle fade
+- **97% inside → 8% outside (8/96).** A hard cliff, not a gentle fade — and the few that worked were rotated so their centroid fell back near the trained zone
 - The policy interpolates within its data and does not extrapolate past it — 9 cm is well within the arm's reach, so this is a *learned* limit, not a mechanical one
 
 IMAGE: https://raw.githubusercontent.com/ACWArob/magpie-vla/ros/docs/figures/appendix/ood_ring.png

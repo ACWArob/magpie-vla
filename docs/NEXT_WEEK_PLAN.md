@@ -8,7 +8,7 @@ Nothing here is started yet — this is the agreed plan to pick up next week.*
 | Failure | Measured | Fix | Needs grid? |
 |---|---|---|---|
 | 0° aliasing (in-zone) | 88% / grade 0.58 at 0° | **V1.1**: canonicalize square-object angle labels + ~50 replacement episodes | **YES** (0° grid placements) |
-| OOD extrapolation cliff | 97% → 13% at ±9cm | **Input-ablation** (mentor, 2026-07-14): drop absolute `x` + orientation `θ` from the policy STATE input so it must locate the block visually (wrist cam ⇒ position-invariant view); optionally switch to relative/delta actions for consistency | **NO** — reuses existing 229 episodes |
+| OOD extrapolation cliff | 97% → 8% (8/96) at ±9cm | **Input-ablation** (mentor, 2026-07-14): drop absolute `x` + orientation `θ` from the policy STATE input so it must locate the block visually (wrist cam ⇒ position-invariant view); optionally switch to relative/delta actions for consistency | **NO** — reuses existing 229 episodes |
 
 ## Why input-ablation should help the OOD cliff (mentor's insight, made precise)
 
@@ -37,7 +37,7 @@ consistent (same image at 2 positions can't map to 2 absolute targets).
 
 | Policy | Data | Input | In-zone | OOD ring |
 |---|---|---|---|---|
-| V1 baseline | grid | absolute | 97% | 13% |
+| V1 baseline | grid | absolute | 97% | 8% |
 | V1 + ablation | grid | no x/θ (+rel?) | ? | **? ← the OOD test** |
 | V1.1 + ablation | grid + label fix | no x/θ | **~100%?** | ? |
 

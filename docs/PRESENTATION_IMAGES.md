@@ -13,7 +13,7 @@ Legend: ⭐ = strongest / bold enough to headline a slide · 🆕 = made 2026-07
 
 | Image | Shows | Best slide | URL (append to base) |
 |---|---|---|---|
-| ⭐🆕 **competence_map** | Green trained zone (97%) framed by red OOD ring (13%) — where it works vs stops | The OOD / competence-boundary slide | `talk/competence_map.png` |
+| ⭐🆕 **competence_map** | Green trained zone (97%) framed by red OOD ring (8%) — where it works vs stops | The OOD / competence-boundary slide | `talk/competence_map.png` |
 | ⭐🆕 **v0_v1_rotated** | Two bars: V0 FROZE (0/75) vs V1 100% (75/75) on rotated blocks | The V0→V1 payoff / "only data changed" | `talk/v0_v1_rotated.png` |
 | ⭐ **v1_eval_heatmap** | The 100-grasp result, 4 angle panels, colour = grade | The results slide (July 13) | `v1_eval_heatmap.png` |
 | ⭐🆕 **tiny_data_stat** | Hero stat: "43 minutes → 97/100 · 442 MB · 0 labels" | Data-efficiency punch / transition | `talk/tiny_data_stat.png` |
@@ -41,6 +41,7 @@ Legend: ⭐ = strongest / bold enough to headline a slide · 🆕 = made 2026-07
 
 | Image | Shows | Best slide | URL |
 |---|---|---|---|
+| ⭐🆕 **intro_vla** | Two panels: the see→decide→move loop + what a VLA is (Vision+Language→Action) | The background / intro slide (non-technical audience) | `talk/intro_vla.png` |
 | ⭐ **fig1_pipeline** | Camera-ready pipeline loop with measured numbers in each box | The loop-at-a-glance slide | `appendix/fig1_pipeline.png` |
 | 🆕 **timeline** | May→July milestone timeline, 5 dots | The timeline slide | `talk/timeline.png` |
 | **sam3_wrist_overlay** | Live wrist frame with SAM3 mask (0.96 score) | The perception / expert slide | `sam3_wrist_overlay.png` |
