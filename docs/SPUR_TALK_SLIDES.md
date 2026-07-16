@@ -122,18 +122,23 @@ IMAGE: `spur/competence.png`
 ---
 
 ## Slide 11 — REFERENCES  [nav: References]
-- Zhao et al., *Action Chunking Transformers (ACT)*, 2023
-- Mandlekar et al., *MimicGen*, CoRL 2023
-- Lin et al., *Data Scaling Laws in Imitation Learning*, 2024
-- SAM3 (Meta) · GraspGenX (NVlabs) · DeliGrasp
+**Tools & models used:**
+- SAM3 — segmentation (Meta) · GraspGenX — grasp planning (NVlabs) · DeliGrasp — grip force
+- Gemini 2.5 Flash — detection + quality judge (Google) · ACT — the policy (Zhao et al. 2023)
+- LeRobot — dataset + training (Hugging Face)
 
-*Notes: don't read these — they're on the slide for credit.*
+**Ideas:** MimicGen (Mandlekar 2023) · Data Scaling Laws (Lin 2024)
+
+*Notes: don't read these — on the slide for credit. This slide honestly reflects how much we
+stood on: six real tools end-to-end.*
 
 ---
 
 ## Build notes
-- Use the **SPUR template** you were given (the section-nav sidebar + CU footer). Fill each
-  slide's section into the nav; highlight the current section.
+- Use the **SPUR template** structure (section-nav sidebar). **Skip the 'Engineering Career
+  Hub' footer** — that's the career center's branding on their teaching slides; the student
+  EXAMPLE in the packet has no footer. Keep slide numbers. The sidebar is optional (the
+  example didn't use it) but signals structure nicely.
 - Keep the recolored `spur/` images — they're already burgundy/beige/orange to match.
 - Two videos, if you record them: a collection cycle → slide 3; a rotated-block pick → slide 6.
 - 8-min cut if tight: drop slide 9 (fold into 8) and slide 4 (fold the grid idea into slide 3).
