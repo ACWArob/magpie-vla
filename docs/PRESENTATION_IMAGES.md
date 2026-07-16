@@ -32,6 +32,7 @@ Legend: ⭐ = strongest / bold enough to headline a slide · 🆕 = made 2026-07
 | Image | Shows | Best slide | URL |
 |---|---|---|---|
 | ⭐🆕 **bakeoff_winner** | minAreaRect 4.5° vs PCA/GGX 11.5° vs depth-PCA 12.7° vs fixed-90° 22.5° | "why minAreaRect" / decision slide | `talk/bakeoff_winner.png` |
+| ⭐🆕 **angle_lines** | Grasp-angle LINES drawn over the block at 0/25/45/70° — minAreaRect tracks every angle, fixed-90° only works at 0° | "why minAreaRect" (the intuitive version) | `talk/angle_lines.png` |
 | ⭐ **gate_scoreboard** | 12-panel chosen-vs-rejected, every decision quantified | Backup / "everything is measured" | `appendix/gate_scoreboard.png` |
 | **bakeoff_live_angles** | The full live bake-off (angles + detector latency) | Appendix / detail | `appendix/bakeoff_live_angles.png` |
 | **offline_detectors** | SAM3 vs HSV: detection, latency, agreement | Detector-choice detail | `appendix/offline_detectors.png` |
