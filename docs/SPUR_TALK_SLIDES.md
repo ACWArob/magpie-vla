@@ -103,13 +103,13 @@ IMAGE: `spur/competence.png`
 
 ## Slide 9 — CONCLUSIONS  [nav: Conclusions]
 **What's next**
-- **Simulation** → generate far more training data than the real robot can
-- **Live memory** → the robot keeps improving on its own, while it works
-- More objects · placing them at a target
+- Remove position from the input (fix the cliff)
+- Fix the 0° aliasing
+- Simulation for more data
+- Live memory
+- More objects + placement
 
-*Notes: 25s — end on the vision. "The real goal: a robot that trains itself in simulation and
-gets better every day from its own memory." (The vision fix for the cliff is the immediate
-step; simulation + memory are where it's heading.)*
+*Notes: 25s — just the to-do list. Mention which one you're most excited about.*
 
 ---
 
