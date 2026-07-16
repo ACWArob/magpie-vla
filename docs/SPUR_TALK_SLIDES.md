@@ -103,11 +103,13 @@ IMAGE: `spur/competence.png`
 
 ## Slide 9 — CONCLUSIONS  [nav: Conclusions]
 **What's next**
-- Fix the remaining failure — remove absolute position from the robot's input so it relies on vision
-- More objects (fruit), and placing them at a target
-- Toward a robot that keeps getting better on its own
+- **Simulation** → generate far more training data than the real robot can
+- **Live memory** → the robot keeps improving on its own, while it works
+- More objects · placing them at a target
 
-*Notes: 25s. Optional — merge into slide 8 if you're over time.*
+*Notes: 25s — end on the vision. "The real goal: a robot that trains itself in simulation and
+gets better every day from its own memory." (The vision fix for the cliff is the immediate
+step; simulation + memory are where it's heading.)*
 
 ---
 
