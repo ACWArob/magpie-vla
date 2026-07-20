@@ -26,7 +26,14 @@ for n,e in [('lerobot_v1_noXTheta',7),('lerobot_v1_noForce',8),('lerobot_v1_noBo
     d=LeRobotDataset('magpie/v1',root='\$HOME/'+n); s=d[0]
     print(n,'state',s['observation.state'].shape[0],'expected',e)\""
 
-# 4. write + submit a slurm job per ablation
+# 4. write + submit a slurm job per ablation (W&B if WANDB_API_KEY is set)
+# W&B ON by default — reads your key from ~/.netrc on NSF (created by `wandb login` once).
+# Override key with WANDB_API_KEY env if you prefer. Set WANDB=off to disable.
+WB_LINE="--wandb.enable=true --wandb.project=magpie-ablations --wandb.mode=online"
+WB_SETUP="pip install -q wandb || true;"
+[ -n "${WANDB_API_KEY:-}" ] && WB_SETUP="export WANDB_API_KEY=$WANDB_API_KEY; $WB_SETUP"
+if [ "${WANDB:-on}" = "off" ]; then WB_LINE="--wandb.enable=false"; WB_SETUP=""; fi
+say "W&B: ${WANDB:-on} -> project magpie-ablations"
 for D in noXTheta noForce noBoth; do
   ssh "$R" "cat > ~/train_$D.slurm <<EOF
 #!/usr/bin/env bash
@@ -41,11 +48,13 @@ for D in noXTheta noForce noBoth; do
 set -euo pipefail
 module purge && module load python/miniforge3_pytorch/2.7.0 cuda
 source ~/lerobot_env/bin/activate
+$WB_SETUP
 python -m lerobot.scripts.lerobot_train \\
   --dataset.repo_id=magpie/v1 --dataset.root=\\\$HOME/lerobot_v1_$D \\
   --policy.type=act --policy.push_to_hub=false --policy.device=cuda \\
   --output_dir=\\\$HOME/act_${D}_run \\
-  --batch_size=8 --steps=150000 --save_freq=10000 --log_freq=200 --wandb.enable=false
+  --wandb.run_id=act_$D \\
+  --batch_size=8 --steps=150000 --save_freq=10000 --log_freq=200 $WB_LINE
 EOF
 sbatch ~/train_$D.slurm"
 done
