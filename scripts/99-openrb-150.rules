@@ -1,0 +1,19 @@
+# ROBOTIS OpenRB-150 (MAGPIE gripper controller) — keep ModemManager off it.
+#
+# ModemManager probes every new /dev/ttyACM* with AT commands on the assumption
+# it might be a cellular modem. On SAMD21-class CDC-ACM boards that probe can
+# wedge or reset the board; it then disconnects, re-enumerates, gets probed
+# again, and loops. Observed 2026-07-21 as /dev/ttyACM0 re-enumerating on a
+# steady ~8s cycle, which stalled the eval because /gripper/state stops
+# publishing while the node stays up with its services registered.
+#
+# Install:
+#   sudo cp scripts/99-openrb-150.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# Then unplug/replug the board.
+#
+# Also gives a stable symlink /dev/openrb so the driver never chases ttyACM
+# numbering after a re-enumeration.
+
+ACTION=="add|change", SUBSYSTEM=="usb", ATTRS{idVendor}=="2f5d", ATTRS{idProduct}=="2202", ENV{ID_MM_DEVICE_IGNORE}="1"
+ACTION=="add|change", SUBSYSTEM=="tty", ATTRS{idVendor}=="2f5d", ATTRS{idProduct}=="2202", ENV{ID_MM_DEVICE_IGNORE}="1", ENV{ID_MM_PORT_IGNORE}="1", ENV{MTP_NO_PROBE}="1", MODE="0660", GROUP="dialout", SYMLINK+="openrb"
