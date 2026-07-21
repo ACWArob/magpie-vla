@@ -11,7 +11,9 @@
 # Usage:  bash scripts/bringup_gripper_ft.sh
 # Then just plug the gripper USB back in; this does the rest.
 
-set -uo pipefail
+# NOTE: no `set -u` here. ROS's setup.bash references unset variables, so with
+# -u this script dies silently the moment it sources ROS, printing nothing.
+set -o pipefail
 source /opt/ros/humble/setup.bash  2>/dev/null
 source ~/ws_ctrl/install/setup.bash 2>/dev/null
 
