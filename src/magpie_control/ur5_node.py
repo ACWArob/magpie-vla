@@ -47,6 +47,8 @@ def _axisangle_to_quat(rv):
 
 def _quat_to_axisangle(w, x, y, z):
     """Convert (w, x, y, z) quaternion to axis-angle rotation vector."""
+    if w < 0.0:                      # q and -q are one rotation -> force canonical (<=pi) rotvec
+        w, x, y, z = -w, -x, -y, -z
     angle = 2.0 * np.arccos(np.clip(w, -1.0, 1.0))
     s = np.sin(angle / 2.0)
     if s < 1e-10:
