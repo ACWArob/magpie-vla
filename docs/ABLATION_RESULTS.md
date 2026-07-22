@@ -53,6 +53,64 @@ the policy to give anything up in the trained zone; if anything the grasps are
 cleaner. That is the precondition for the OOD test to mean something: had
 in-zone grasping collapsed, an OOD number would be uninterpretable.
 
+## Result 2 — act_noXTheta, extrapolation (OOD ring)  ✅ MEASURED (stopped early at 20)
+
+**Dropping x/θ did NOT fix the extrapolation cliff — the rate is statistically
+identical to baseline. What changed is *how* it fails.**
+
+| | act_v1 (absolute) | **act_noXTheta (no x/θ)** |
+|---|---|---|
+| OOD ring | 2/15 (13%) · 95% CI [4, 38]% | **3/20 (15%) · 95% CI [5, 36]%** |
+| Fisher exact | — | **p = 1.00 (indistinguishable)** |
+
+Sample: 20 of a planned 52-combo spread (user-stopped); covers the left column,
+bottom edge, and one corner combo. Data: `data/eval_noXTheta_ood.json`; every
+rollout has a wrist mp4 + 10 Hz TCP/aperture trace in `data/eval_motion/`.
+
+By position — the picks hug the trained zone, the corners are 0-for-everything:
+
+| Ring position | Picks | Distance outside zone |
+|---|---|---|
+| (−9,−3), (−9,−6) | 3 / 7 | 3 cm (adjacent to zone) |
+| (−9,−9), (−3,−9), (+3,−9), (+9,−9) | 0 / 13 | 3–6.5 cm (edges + corners) |
+
+All 3 picks were at rotated placements (25°/45°) — same surface pattern as
+v1's 2 ring successes.
+
+### The mechanism (measured from the 20 recorded trajectories)
+
+- **It looks.** Close position tracks the commanded block position: r = 0.92
+  (x-axis). This is the behavior the ablation was designed to produce, and v1
+  almost certainly lacks (its state-x was a perfect shortcut in training).
+- **It clamps.** Close-x never exceeds **−6.6 cm** against blocks commanded at
+  −9. The trained placements span ±6 cm — the policy walks toward the block and
+  stops at the exact boundary of its training data. Mean undershoot 4.7 cm.
+- **Fails close on empty air** (aperture → −5 mm, fully shut) at the boundary;
+  the 15% "successes" are geometry, not generalization: a ~3 cm undershoot on a
+  5 cm block still catches an edge at ring cells adjacent to the zone, never at
+  corners 6–7 cm out.
+
+**Why (three stacked causes):** (1) ACT regresses absolute action targets, and
+every training target lies inside ±6 cm — a regressor cannot emit values outside
+the support of its labels, so the output manifold is clipped at the boundary it
+was trained on (the measured −6.6 wall). (2) The wrist view at home height sees
+the whole mat, so "block at 9 cm" is a genuinely novel scene, mapped to the
+nearest familiar one. (3) Behavioral cloning interpolates; nothing in it
+extrapolates.
+
+**Bottom line:** removing x/θ moved the failure from *"doesn't look"* to
+*"looks, but can only act inside the box it has seen."* The cliff migrated from
+the state distribution to the **action** distribution. The variant that attacks
+that directly — relative/delta actions, where a far block becomes a sequence of
+in-distribution short hops under the 10-step receding horizon — is on record as
+the next experiment but **not started** (user decision 2026-07-22: understand
+this data first).
+
+**v1's mechanism is predicted, not measured** (its old ring run predates
+recording). The `b3` cell in `ablation_noXTheta.ipynb` runs act_v1 on the
+identical ring with recording, whenever robot time allows — predicted signature:
+close positions *uncorrelated* with the block.
+
 ## Honest caveats (read before quoting these numbers)
 
 1. **The instrument changed between the two runs.** act_v1 (97/100) was measured
@@ -69,27 +127,24 @@ in-zone grasping collapsed, an OOD number would be uninterpretable.
 3. **The headline claim is about extrapolation and is NOT yet tested.** Grade
    parity in-zone is necessary but not the hypothesis. See below.
 
-## What's left (the actual hypothesis test)
+## What's left
 
-The whole point of dropping absolute pose is the **OOD cliff**. act_v1 fell from
-97% in-zone to **~8%** on the ±9cm ring — it interpolated but did not
-extrapolate. The open question:
-
-> **Does act_noXTheta hold up on the OOD ring where act_v1 collapsed?**
-
-Pending blocks:
-- **act_noXTheta · OOD ring** (`b2`) — the headline experiment
-- **act_noForce · grid** — is force needed in-zone?
-- **act_noBoth · grid + OOD** — both channels dropped
-
-Target table (extrapolation column is the result that matters):
+Scoreboard (extrapolation was the headline question — now answered):
 
 | Policy | Input | In-zone | OOD ring |
 |---|---|---|---|
-| act_v1 | absolute | 97% · 0.70 | ~8% |
-| **act_noXTheta** | no x/θ | **96% · 0.81 ✅** | **? ← pending** |
-| act_noForce | no force | ? | — |
+| act_v1 | absolute | 97% · 0.70 | 2/15 (13%) |
+| **act_noXTheta** | no x/θ | **96% · 0.81 ✅** | **3/20 (15%) ✅ — same rate, different mechanism** |
+| act_noForce | no force | **? ← NEXT** | — |
 | act_noBoth | no x/θ/force | ? | ? |
+| act_relative (not trained) | no x/θ + delta actions | — | the variant the mechanism data points at |
+
+Pending, in order:
+1. **act_noForce · grid** (`ablation_noForce.ipynb` b1) — is grip force needed in-zone? ⟵ NEXT
+2. **act_noBoth · grid + OOD**
+3. `b3` — act_v1 on the recorded ring (failure-mode figure), when robot time allows
+4. ~20-combo act_v1 in-zone re-slice (the instrument caveat)
+5. act_relative — train offline from the same 229 eps (no robot needed); deliberately deferred
 
 ## Hardware note (why this took a full day)
 
