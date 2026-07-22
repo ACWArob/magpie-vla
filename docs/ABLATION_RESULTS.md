@@ -111,6 +111,74 @@ recording). The `b3` cell in `ablation_noXTheta.ipynb` runs act_v1 on the
 identical ring with recording, whenever robot time allows — predicted signature:
 close positions *uncorrelated* with the block.
 
+## Result 3 — act_noForce, interpolation (100-grasp grid)  ✅ COMPLETE — the surprise
+
+**Removing grip force cost 20 points of pick rate in-zone. Both of us (user and
+assistant) predicted it would be redundant. It is not — and the *way* it fails
+reveals what the channel was actually for.**
+
+| | act_v1 | act_noXTheta | **act_noForce** |
+|---|---|---|---|
+| Pick rate | 97/100 | 96/100 | **76/100** |
+| Mean grade | 0.696 | 0.813 | **0.639** |
+| Fisher vs the other two | — | — | **p ≤ 0.0001** |
+
+By angle — a clean gradient that tracks how much alignment correction each case
+needs:
+
+| Angle | Picks | Grade | Yaw error |
+|---|---|---|---|
+| 25° | 22/25 | 0.81 | 8.8° |
+| 0° | 19/25 | 0.64 | 20.7° |
+| 45° | 22/25 | 0.72 | 20.5° |
+| **70°** | **13/25** | **0.38** | **30.9°** |
+
+Failure taxonomy (24 fails): **20 closed-on-empty-air** (fingers fully shut,
+ap ≈ −5 mm), 4 closed-then-dropped, 0 never-closed — the gripper hardware
+executed every close; the policy closed in the wrong place. Data:
+`data/eval_noForce_grid.json`, 100 recorded rollouts (`noforce_*`), figures
+`eval_noForce_grid_heatmap/summary.png`.
+
+### Mechanism (measured from the 100 trajectories)
+
+- **Fails close 1.8 ± 1.1 cm off block center** (picks: 0.9 ± 0.6; noXTheta:
+  0.8 ± 0.7). On a 5 cm block, ~2 cm puts the finger line at the edge — the
+  close clips a corner, shoves the block out, and shuts on air (confirmed on
+  video: wrist frame at the close moment shows fingers on the block's corner).
+- **Closes fire late** (mean step 102 vs noXTheta's 93; up to +4.6 s early in
+  the run) and with incomplete yaw correction (see the 70° column).
+- Close **height** is unchanged — descent is fine; it is the lateral/yaw
+  alignment and the commit timing that break.
+
+### Interpretation — force was the phase clock, not touch confirmation
+
+The naive prediction said force is redundant for a rigid block because the
+aperture plateau already signals contact. The data killed that: contact
+confirmation was never the channel's main job. In every training episode,
+grip force traces one clean arc — flat during centering/descent, ramp at
+squeeze, high during hold. It is the single input that unambiguously encodes
+*which phase of the grasp the policy is in*. Two supporting facts: (a)
+`wrist_fz` is all-zero in the training data (verified), so grip force was the
+**only live touch channel the policy ever had**; (b) with it removed, the
+commit-to-close decision decouples from centering progress — the policy
+hesitates, then closes while still misaligned, failing worst exactly where the
+most correction is needed (70°).
+
+**One-line version: the force input's role was temporal, not tactile — it told
+the policy *when* it was, not *what* it was touching.**
+
+### Registered prediction for act_noBoth (falsifiable, test next)
+
+noBoth drops x/θ *and* force → it should exhibit **both** measured pathologies:
+noForce's late/off-center closes in-zone (pick rate ≈ 76% or worse, worst at
+70°) *plus* noXTheta's track-then-clamp on the OOD ring (~15%, clamped at
+±6 cm). If noBoth lands near noXTheta's 96% instead, the phase-clock story is
+wrong. Written down before the run on 2026-07-22.
+
+Open checks before this is paper-firm: (1) training-loss parity on DeltaAI
+(rules out "noForce just converged badly" — needs Duo login); (2) the act_v1
+in-zone re-slice for the instrument caveat below.
+
 ## Honest caveats (read before quoting these numbers)
 
 1. **The instrument changed between the two runs.** act_v1 (97/100) was measured
@@ -135,16 +203,16 @@ Scoreboard (extrapolation was the headline question — now answered):
 |---|---|---|---|
 | act_v1 | absolute | 97% · 0.70 | 2/15 (13%) |
 | **act_noXTheta** | no x/θ | **96% · 0.81 ✅** | **3/20 (15%) ✅ — same rate, different mechanism** |
-| act_noForce | no force | **? ← NEXT** | — |
+| act_noForce | no force | **76% · 0.64 ✅ (−20 pts — the surprise)** | — |
 | act_noBoth | no x/θ/force | ? | ? |
 | act_relative (not trained) | no x/θ + delta actions | — | the variant the mechanism data points at |
 
 Pending, in order:
-1. **act_noForce · grid** (`ablation_noForce.ipynb` b1) — is grip force needed in-zone? ⟵ NEXT
-2. **act_noBoth · grid + OOD**
-3. `b3` — act_v1 on the recorded ring (failure-mode figure), when robot time allows
-4. ~20-combo act_v1 in-zone re-slice (the instrument caveat)
-5. act_relative — train offline from the same 229 eps (no robot needed); deliberately deferred
+1. **act_noBoth · grid + OOD** ⟵ NEXT (tests the registered prediction in Result 3)
+2. `b3` — act_v1 on the recorded ring (failure-mode figure), when robot time allows
+3. ~20-combo act_v1 in-zone re-slice (the instrument caveat)
+4. act_relative — train offline from the same 229 eps (no robot needed); deliberately deferred
+5. training-loss parity check on DeltaAI (one command, needs Duo)
 
 ## Hardware note (why this took a full day)
 
