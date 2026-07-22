@@ -1,7 +1,7 @@
 # Input-Ablation Results — dropping absolute position/orientation from the policy state
 
-*On record 2026-07-21. Interpolation (in-zone) block complete for the first
-variant; extrapolation (OOD ring) still pending — see "What's left".*
+*On record 2026-07-21/22. All four interpolation grids complete; noXTheta ring
+measured; noBoth ring pending — see "What's left".*
 
 ## The experiment
 
@@ -179,6 +179,114 @@ Open checks before this is paper-firm: (1) training-loss parity on DeltaAI
 (rules out "noForce just converged badly" — needs Duo login); (2) the act_v1
 in-zone re-slice for the instrument caveat below.
 
+## Result 4 — act_noBoth, interpolation (100-grasp grid)  ✅ COMPLETE — the registered prediction FAILED
+
+**noBoth: 94/100, mean grade 0.793.** The prediction on record (written before the
+run) said ≤76% with noForce's off-center-close signature. It landed at
+noXTheta's level instead (94 vs 96, Fisher p = 0.75; vs noForce p = 0.0006).
+**The phase-clock story, as stated, is wrong** — and the correction is the most
+useful finding of the study.
+
+| Angle | Picks | Grade | Yaw err |
+|---|---|---|---|
+| 0° | 20/25 | 0.64 | 21.2° |
+| 25° | 24/25 | 0.87 | 10.5° |
+| 45° | 25/25 | 0.85 | 16.8° |
+| **70°** | **25/25** | **0.81** | 21.4° |
+
+70° — the column that collapsed to 13/25 without force — is perfect again with
+force *and* x/θ gone. Fails: 4 never-closed + 2 closed-on-air, five of six at
+0°; zero re-grips needed. Data: `data/eval_noBoth_grid.json`, 100 recorded
+rollouts (`noboth_*`). The OOD ring for noBoth (`b2`) is **not yet run** — the
+ring half of the prediction (~15%, clamped) is still open.
+
+## Cross-policy patterns — the four-way read (100 matched combos)
+
+### The headline table
+
+| | act_v1 | noXTheta | noForce | noBoth |
+|---|---|---|---|---|
+| State input | full 9 | no x/θ | no force | no x/θ/force |
+| Picks /100 | 97 | 96 | **76** | 94 |
+| 95% CI | [92,99] | [90,98] | [67,83] | [88,97] |
+| Mean grade | 0.696 | **0.813** | 0.638 | **0.793** |
+| Re-grips needed | 96* | 1 | 5 | **0** |
+| Mean close step | 154* | 99 | 102 | 110 |
+| Close offset (picks) | — | 0.7 cm | 0.9 cm | 0.8 cm |
+| z-at-close σ | — | **2.9 mm** | 9.5 mm | 9.8 mm |
+
+\* act_v1 was measured on the pre-fix instrument whose async close chain
+stalled and retried (that is what 96/100 re-grips and step 154 are). Its
+pick rate is robust to this — the retries rescued the closes — but its grade,
+step and retry columns are not comparable to the other three. The ~20-combo
+re-slice remains the open fix.
+
+Pairwise Fisher: **noForce differs from all three (p ≤ 0.0006); v1, noXTheta
+and noBoth are mutually indistinguishable** (p ≥ 0.50).
+
+### Pattern 1 — the interaction effect (the finding)
+
+```
+                      x/θ present        x/θ removed
+  force present       97% (act_v1)       96% (noXTheta)
+  force removed       76% (noForce)      94% (noBoth)   ← prediction said ≤76%
+```
+
+Removing force alone costs 20 points. Removing force *and* the absolute pose
+costs ~2. **The ablations are non-additive: removing more inputs undid the
+damage of removing one.** Force was never intrinsically necessary — the
+information it carried (grasp phase) is also present in vision, and noBoth
+proves a policy can learn it from vision alone.
+
+**Revised interpretation — reliance, not necessity.** What an ablation measures
+is not "was this information needed" but "did the trained policy *depend* on
+this channel." With the full state, training settles into a **state-led
+solution**: x/θ answer *where*, force answers *when*, and the visual pathway is
+never pushed to carry either (the shortcut-learning / gradient-starvation
+effect). noForce keeps the two strongest shortcuts (x/θ) — training stays
+state-led — but the *when* cue is gone and vision was never trained up to
+supply it: late, off-center commits, collapsing exactly where correction demand
+is highest (70°: 13/25, yaw 31°). Remove the whole scaffold (noBoth) and
+training is forced into a **vision-led solution** that carries *where and when*
+— 94%, tied-best grade, zero re-grips. The 4.6 s hesitations vanish.
+
+**One-line version: inputs are not capabilities the policy has; they are
+dependencies the policy acquires. Partial ablation of a shortcut set is worse
+than full ablation.**
+
+### Pattern 2 — the 0° column is input-independent (it's the data)
+
+| | v1 | noXTheta | noForce | noBoth |
+|---|---|---|---|---|
+| 0° picks | 22 | 24 | 19 | 20 |
+| all-other-angles | 75/75 | 72/75 | 57/75 | **74/75** |
+
+Every input set is weakest at 0°, and noBoth's six fails are almost all there
+(incl. its 4 never-closed — the v0-style freeze signature). This is the
+**label-aliasing defect in the training data** (0°/90° bimodality), untouched
+by any input choice — direct, four-way-replicated evidence for the V1.1
+canonicalization collection, and clean evidence that *input* ablations cannot
+fix a *label* defect.
+
+### Pattern 3 — noForce's fails are its own
+
+Per-combo overlap: **21 combos are failed by noForce alone**; only 3 combos are
+failed by ≥2 policies. The 76% is not shared hardness or an instrument artifact
+— it is a policy-specific pathology (and its mechanism is measured: 1.8 cm
+off-center closes at unchanged height, 25°→70° gradient).
+
+### Pattern 4 — the minimal-state policies have the best mechanics
+
+Excluding the 0° data-defect column: **noBoth 74/75 (99%) and noXTheta 72/75
+(96%), grades tied at 0.843** — the two best grades measured on this
+instrument, with 0–1 re-grips between them. The practical design rule this
+study supports: **for in-zone grasping, vision + aperture is the strongest
+input set; absolute pose and force feedback are shortcut liabilities rather
+than assets** — they buy nothing in-zone (v1 = noXTheta = noBoth statistically)
+and their *partial* presence is the one configuration that breaks (noForce).
+Still open: whether minimal state also helps OOD (noBoth ring pending; the
+absolute-action clamp predicts it will not).
+
 ## Honest caveats (read before quoting these numbers)
 
 1. **The instrument changed between the two runs.** act_v1 (97/100) was measured
@@ -204,11 +312,11 @@ Scoreboard (extrapolation was the headline question — now answered):
 | act_v1 | absolute | 97% · 0.70 | 2/15 (13%) |
 | **act_noXTheta** | no x/θ | **96% · 0.81 ✅** | **3/20 (15%) ✅ — same rate, different mechanism** |
 | act_noForce | no force | **76% · 0.64 ✅ (−20 pts — the surprise)** | — |
-| act_noBoth | no x/θ/force | ? | ? |
+| act_noBoth | no x/θ/force | **94% · 0.79 ✅ (prediction falsified)** | ? ← pending |
 | act_relative (not trained) | no x/θ + delta actions | — | the variant the mechanism data points at |
 
 Pending, in order:
-1. **act_noBoth · grid + OOD** ⟵ NEXT (tests the registered prediction in Result 3)
+1. **act_noBoth · OOD ring** (`b2`) — the ring half of the prediction, still open
 2. `b3` — act_v1 on the recorded ring (failure-mode figure), when robot time allows
 3. ~20-combo act_v1 in-zone re-slice (the instrument caveat)
 4. act_relative — train offline from the same 229 eps (no robot needed); deliberately deferred
