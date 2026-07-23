@@ -73,6 +73,137 @@ is the same pipeline with a part prompt. Two routes, both preserved:
    picks the task piece (ShapeGrasp pattern) → grasp that piece. Robust when
    language segmentation fails; same mesh exports to MuJoCo.
 
+## Every stage of the pipeline: options considered, chosen or rejected, why
+
+*(V2 counterpart of DECISION_LEDGER.md — the FULL walk, drivers to eval.
+"Looks similar to V1" is deliberate where it happens: the loop shape is
+measured to work (67 eps/hr → 97% policy). Every "keep" below is defended,
+not defaulted. ✅ chosen · ❌ rejected · ⏸ deferred with trigger.)*
+
+### Layer A — hardware & drivers
+
+**A1. Arm + motion.** UR5e via ur5_node/RTDE — ✅ keep (no alternative in the
+room). moveL-singularity escape via joint moves — ✅ keep (measured recovery).
+Speedup 1.35× — ✅ keep for transit, ❌ for descend near produce (bruise risk):
+descend at V1 speed.
+**A2. Gripper fingers.** Bare AX-12 fingers (V1) — ❌ risky on produce: the
+force floor games we play (2 N resets, 16 N clamp) are coarse next to a
+strawberry. **Compliant fingertip pads (silicone/foam tape) — ✅ chosen,
+pending a $5 hardware decision by user**: passive compliance buys margin that
+no force controller matches at our sensor resolution. Soft gripper swap — ❌
+different robot, out of scope. Tactile (eFlesh/TouchIQ) — ⏸ August roadmap.
+**A3. Camera.** Single wrist D405 — ✅ keep: schema stability with V1 data,
+and every V2 method consumes its mask/depth. Add overhead cam — ❌ for now:
+new calibration + schema break mid-summer; revisit only if occlusion-during-
+place proves blocking. Known D405 issue: IR-stripe artifacts on glossy
+surfaces (already bit us once — the mask_grasp_angle fix exists because of
+it) → V2 rule: **2D mask is authoritative; depth is advisory** on shiny
+produce.
+**A4. FT sensor.** Exists, publishes, was never recorded (wrist_fz all-zero
+verified) — ✅ wire into recorder + use for guarded place. No alternative
+considered seriously; it's free.
+**A5. Infra discipline.** udev/ModemManager rule, verified-open resets,
+re-grip cadence, gpu_reap — ✅ keep verbatim (all are responses to measured
+failures from 07-21/22).
+
+### Layer B — perception
+
+**B1. Detection (what & where).** Gemini bbox detect (V1) — ✅ keep as the
+what/where oracle + arbiter; it is not the per-frame bottleneck. Grounding-
+DINO/OWL-ViT — ❌ another VRAM tenant duplicating what Gemini+SAM3 cover.
+LocateAnything — ❌ GPU (backlogged since June).
+**B2. Segmentation.** **SAM3 concept prompt per object — ✅ chosen** (open-
+vocab, zero code per object, part-prompt upside). HSV — ❌ dies on multi-
+color produce. SAM3 part-level prompting — ⏸ Day-2 10-min test decides how
+much of "grasp the handle" is free.
+**B3. Point cloud / 3D.** build_segmented_pcd + centroid — ✅ keep for
+position; per-object 3D model accumulation — ✅ keep in background (feeds
+GGX now, CoACD parts + MuJoCo later). Shape completion nets — ❌ VRAM for
+marginal gain at tabletop ranges.
+
+### Layer C — grasp synthesis
+
+**C1. Angle + width.** (unchanged from earlier draft) minAreaRect-only — ❌;
+PCA/depth-PCA/fixed-90 — ❌ measured losers; raw triangulation — ❌
+representation-not-decision; GG-CNN/GR-ConvNet — ⏸ bench (port cost);
+EconomicGrasp/AnyGrasp/Contact-GraspNet — ❌ VRAM/licensing; superquadrics/
+CoACD — ⏸ needs accumulated model. **Shape-gated ladder + GraspGenX
+cross-check — ✅**, Day-2 live bake-off is the final referee.
+**C2. Centering target — a real V2 change.** V1 centered on the MASK
+CENTROID — correct for a cube, WRONG for a strawberry (centroid includes the
+leaves; the grasp point is the body). **✅ center on the chosen grasp-pair
+midpoint from the ladder, not the centroid.** Keep the V1 re-localise-at-
+grasp-angle trick (it fixed the offset drift; same logic applies).
+**C3. Approach direction.** Top-down + tilt-cap (V1 deploy constraint) — ✅
+keep for V2 start: every method and the whole eval instrument assume it.
+Full 6-DoF approach (GGX offers it) — ⏸ trigger: an object the bake-off
+shows is >20% worse top-down (e.g., stemmed cherry); costs IK-near-singularity
+risk we've already been burned by.
+**C4. Grip force.** Fixed 16 N — ❌ crushes produce. Learned — ❌ bootstrap.
+Tactile — ⏸ August. **DeliGrasp — ✅** (mentor's method; its benchmark IS
+delicate produce).
+**C5. Retry policy.** V1's 3 grip-retries — ❌ for produce: each retry
+bruises; **✅ max 1 retry on delicate objects, then re-detect** (the judge's
+deformation term audits whether even 1 was too many).
+
+### Layer D — verify, judge, record
+
+**D1. Physical success check.** Held-through-lift + aperture-in-band — ✅
+keep, but the band becomes **per-object from GraspMemory priors** (20–40 mm
+was cube geometry, meaningless for a banana).
+**D2. Grading agent — NOT replaced, upgraded.** Physical-only — ❌ misses
+"held but crushed". **Gemini VLM judge — ✅ kept** (built a 97% policy; ±0.25
+noise documented and tolerable for a gate) **+ deformation/squish term — ✅
+added** (pre/post width + DeliGrasp compliance readout — physical and
+deterministic). Value heads as gate (RL white paper) — ❌ circular (policy
+grades its own training data) + uncalibrated until it passes its own offline
+AUROC gate; deploy-time scorer only, later at most a second opinion. Human
+labels — ❌ defeats the thesis (agreement sheet stays as *validation*).
+**D3. Recorder.** 10 Hz LeRobot, start at first manipulation move — ✅ keep.
+**Additions ✅: real wrist_fz, per-frame expert phase label, per-episode task
+string** (all near-free; phase = our own force-phase-clock finding). Extra
+cameras/tactile in schema — ❌/⏸ hardware.
+**D4. Reward gate.** held AND grade ≥0.6 — ✅ keep threshold to stay
+comparable with V1 data quality; deformation term gates *in addition*.
+**D5. Grasp memory / priors.** GraspMemory per-object width/force priors —
+✅ promote from passive log to ACTIVE input (prepos width, force seed,
+aperture band). Kalman-style update already implemented.
+
+### Layer E — reset & episode economics
+
+**E1. Reposition.** Scripted place at next target + direct-place optimization
+— ✅ keep; the place leg becomes the **guarded-Fz gentle set-down** and is
+RECORDED (pick AND place data from day 1). Drop-back (V1 eval style) — ❌
+wastes the return trip and bruises fruit.
+**E2. Object degradation — NEW stage V1 never had.** Real produce degrades
+over 100 grasps. Options: single real fruit (❌ episode 60 is grasping a
+different object than episode 1 — label drift), **rotate 3–4 instances +
+artificial produce for bulk with real-fruit validation subsets — ✅ chosen**,
+all-artificial (❌ compliance/DeliGrasp signals go fake). Judge's deformation
+term doubles as the degradation detector → auto-swap prompt to the operator.
+**E3. Session orchestration.** Fixed script (V1) — ❌ single-object only;
+**Gemini proposes next object + placement (AutoRT-lite, ~20 lines) — ✅** for
+multi-object sessions + diversity knobs (mat rotation, lighting, distractors
+— DROID lesson).
+
+### Layer F — train, deploy, eval
+
+**F1. Training recipe.** DeltaAI slurm ACT 100k — ✅ keep verbatim (proven
+3× this month). State-input set for act_v2 — record ALL 9+ channels, choose
+input at training time; ablation says minimal-state is strongest on rigid,
+but force may be genuinely informative for compliant objects → that's a
+planned A/B (act_v2 vs act_v2_noForce), not an assumption either way.
+**F2. Deploy loop.** 10 Hz, n_action_steps=10, no ensembling, rotvec
+canonicalize+rate-limit, tilt-only ori-cap — ✅ keep all (each was a measured
+deploy fix). Best-of-N/abort — ⏸ RL white-paper phases, separate go/no-go.
+**F3. Eval instrument for V2 — must change, and this is easy to miss.**
+Yaw-error grading is MEANINGLESS for radially-symmetric fruit; the 20–40 mm
+aperture band is cube-specific. **✅ per-object grade schema: aperture band
+from priors, yaw term only for objects with a defined long axis, deformation
+term added, fresh-instance rule for eval runs.** Grid protocol + lift-verify
++ resume-safety + motion recording — ✅ keep identical (comparability with
+the entire V1/ablation corpus).
+
 ## What the top labs do — adopted where it fits our one arm + 8 GB
 
 | Source (lab / venue) | Their lesson | Our V2 adoption (cost) |
