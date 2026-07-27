@@ -6,6 +6,31 @@ Grasp pose planning runs both **PCA** (point-cloud principal axes) and **GraspGe
 
 ---
 
+## 🍓 AutoGrasp V2 — any object, delicately (current work, branch `v2-dev`)
+
+V1 grasped one rigid red cube to a 97% policy. **V2 generalizes collection to arbitrary
+objects — banana, strawberry, apple, cup — picked *delicately* and *consistently*, with
+placement recorded for later.** No hardware change: delicacy is software on the existing
+rubber-tipped AX-12 gripper (DeliGrasp adaptive force, min 0.15 N). V1 is frozen and
+recoverable at tag `v1-pipeline` ([docs/V1_FREEZE.md](docs/V1_FREEZE.md)).
+
+- **Plan + full-pipeline reconsideration:** [docs/V2_AUTOGRASP_PLAN.md](docs/V2_AUTOGRASP_PLAN.md)
+  (every stage, chosen/rejected/why)
+- **Collection notebook (object-agnostic):** [notebooks/v2_collect.ipynb](notebooks/v2_collect.ipynb)
+  — set `OBJECT_NAME`, run the no-motion perception dry-run, collect
+- **Modules** (`src/magpie_control/v2/`, 30 unit tests + a 60-check offline self-test):
+  shape-gated grasp **ladder** (routes minAreaRect / polygon / skeleton *by shape*),
+  **planner** (fuses ladder + GraspMemory priors), **state_builder** (records real
+  `wrist_fz` — a V1 all-zero bug), **deformation_check** + **weight_estimate** (don't crush,
+  don't drop), **episode_meta** (phase labels + task strings).
+- **Offline gate:** `python3 scripts/v2_selftest.py` → exercises the whole decision pipeline
+  on six object shapes with no robot.
+
+Status: decision layer built + offline-verified against live SAM3; robot cells reuse V1's
+hardware-proven grasp cell with the object name swapped and the ladder injected.
+
+---
+
 ## Policy training pipeline (V0 → V1, July 2026)
 
 The scripted pipeline above doubles as a **MimicGen-style data generator** for training

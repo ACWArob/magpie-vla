@@ -6,6 +6,29 @@ with placement recorded for later. Policy stays OURS, trained from scratch on
 our own data (ACT baseline; no VLA fine-tuning). V1 is frozen at tag
 `v1-pipeline` and untouched.*
 
+## STATUS (2026-07-27) — what's built vs pending
+
+**Built + offline-verified (no robot), branch `v2-dev`, pushed to `fork` + `personal`:**
+
+| Piece | File | Tests |
+|---|---|---|
+| shape-gated grasp ladder | `src/magpie_control/v2/grasp_ladder.py` | 6 |
+| planner (ladder + priors) | `src/magpie_control/v2/grasp_planner.py` | 6 |
+| state builder (real wrist_fz) | `src/magpie_control/v2/state_builder.py` | (in 9) |
+| deformation + weight gates | `deformation_check.py` · `weight_estimate.py` | 9 + 6 |
+| episode meta (phase/task) | `src/magpie_control/v2/episode_meta.py` | 3 |
+| whole-pipeline self-test | `scripts/v2_selftest.py` | 60 checks |
+| object-agnostic notebook | `notebooks/v2_collect.ipynb` | cells 1–4 run headless |
+
+Verified against **live SAM3** on real images: concept-prompt → mask → sane plan.
+Bugs caught offline before they hit hardware: 8N seed would crush produce (→1.5N);
+strawberry grasped by the leaves (→thickness-weighted center); deformation target was
+the seed not the weight-reconciled force (caught on the apple).
+
+**Pending (needs the robot):** port V1 motion helpers into notebook cells 6–7 (reuse the
+proven grasp cell), SAM3 part-prompt test ("handle"), live ladder-vs-GraspGenX bake-off on
+real produce. **Object order:** cube (control) → 3D-printed apple → banana → strawberry → cup.
+
 ## The architecture in one diagram
 
 ```
