@@ -72,6 +72,10 @@ def run(verbose=True):
                               p.prepos_width_mm > p.expected_width_mm))
         row['checks'].append(('force seeded within delicate cap',
                               (not delicate) or p.seed_force_n <= DELICATE_CAP_N))
+        # delicate objects must SEED gentle (<=2N, DeliGrasp ramps up) — a high
+        # seed would crush produce before adaptive control kicks in
+        row['checks'].append(('delicate seed is gentle (<=2N)',
+                              (not delicate) or p.seed_force_n <= 2.0))
 
         # 2) WEIGH (simulate wrist_fz: baseline 0, holding = -weight)
         fz_hold = -(weight_g / 1000.0 * 9.81)

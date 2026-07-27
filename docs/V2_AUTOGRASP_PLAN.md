@@ -86,12 +86,17 @@ not defaulted. ✅ chosen · ❌ rejected · ⏸ deferred with trigger.)*
 room). moveL-singularity escape via joint moves — ✅ keep (measured recovery).
 Speedup 1.35× — ✅ keep for transit, ❌ for descend near produce (bruise risk):
 descend at V1 speed.
-**A2. Gripper fingers.** Bare AX-12 fingers (V1) — ❌ risky on produce: the
-force floor games we play (2 N resets, 16 N clamp) are coarse next to a
-strawberry. **Compliant fingertip pads (silicone/foam tape) — ✅ chosen,
-pending a $5 hardware decision by user**: passive compliance buys margin that
-no force controller matches at our sensor resolution. Soft gripper swap — ❌
-different robot, out of scope. Tactile (eFlesh/TouchIQ) — ⏸ August roadmap.
+**A2. Gripper fingers.** **Bare AX-12 fingers (V1) — ✅ KEEP, no hardware
+change (user decision 2026-07-27: must work out of the box with these
+grippers).** Evidence it suffices for delicate produce: the gripper resolves
+force to a **measured min of 0.15N** (deligrasp_node), DeliGrasp's adaptive
+grasp SEEDS at 1.5N and ramps up only until slip stops, and V1 already
+**learned stable holds down to 0.50N** on delicate items (eraser, foam brick,
+markers, racquetball). DeliGrasp itself was benchmarked on 12 delicate/
+deformable produce items on this exact gripper class. So delicacy is a
+SOFTWARE property here: low force seed + DeliGrasp adaptive ramp + delicate cap
++ deformation gate + slip_guard. Fingertip pads — ❌ not needed (dropped).
+Soft gripper swap — ❌ different robot. Tactile (eFlesh/TouchIQ) — ⏸ August.
 **A3. Camera.** Single wrist D405 — ✅ keep: schema stability with V1 data,
 and every V2 method consumes its mask/depth. Add overhead cam — ❌ for now:
 new calibration + schema break mid-summer; revisit only if occlusion-during-

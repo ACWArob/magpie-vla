@@ -18,9 +18,13 @@ from dataclasses import dataclass
 
 from .grasp_ladder import propose, GraspProposal
 
-# Sensible fallbacks for a brand-new object with no prior yet.
-_DEFAULT_FORCE_N = 8.0        # DeliGrasp will refine; conservative seed
-_DELICATE_FORCE_CAP_N = 12.0  # never seed above this on an unknown object
+# Fallbacks for a brand-new object with no prior. The SEED is deliberately LOW:
+# DeliGrasp starts gentle (its adaptive_grasp init_force is 1.5N) and RAMPS UP
+# only until the object stops slipping, so a low seed cannot crush produce — the
+# gripper resolves force down to 0.15N and V1 learned holds as low as 0.5N. A
+# high seed (the old 8N) would clamp a strawberry before DeliGrasp adapts.
+_DEFAULT_FORCE_N = 1.5        # == DeliGrasp init_force; adaptive control ramps up
+_DELICATE_FORCE_CAP_N = 12.0  # hard ceiling DeliGrasp may not exceed on delicate objs
 
 
 @dataclass

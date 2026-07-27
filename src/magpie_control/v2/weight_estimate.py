@@ -22,7 +22,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 G = 9.81
-_DEFAULT_MU = 0.7          # silicone-ish fingertip on typical produce; conservative
+_DEFAULT_MU = 0.4          # BARE AX-12 fingers on produce (conservative fallback).
+                          # DeliGrasp/LLM infers per-object friction live; this is
+                          # only the anti-slip sanity floor when no estimate exists.
 _SAFETY = 1.5             # grip-force margin over the slip threshold
 
 
